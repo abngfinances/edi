@@ -30,33 +30,41 @@ import sys
 sys.path.append('.')
 from backtest_data_downloader import BacktestDataLoader, BacktestConfig
 
+# Import strategy core and execution engine
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from strategy.core import TLHStrategy
+from strategy.config import TLHConfig
+from backtesting.backtest_execution_engine import BacktestExecutionEngine
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
+# Use unified config with backtest-specific overrides
 class BacktestParams:
-    """Backtesting parameters"""
+    """Backtesting parameters (extends TLHConfig with backtest-specific values)"""
     INITIAL_CAPITAL = 100000.0  # Start with $100k for meaningful results
-    NUM_STOCKS = 100
-    HARVEST_THRESHOLD = 0.005  # 0.5% loss threshold
-    HARVEST_FREQUENCY = 'weekly'  # 'daily', 'weekly', 'monthly'
+    NUM_STOCKS = TLHConfig.NUM_STOCKS
+    HARVEST_THRESHOLD = TLHConfig.HARVEST_THRESHOLD
+    HARVEST_FREQUENCY = TLHConfig.HARVEST_FREQUENCY
     
     # Tax assumptions
-    SHORT_TERM_TAX_RATE = 0.37  # Federal + state for high earners
-    LONG_TERM_TAX_RATE = 0.238  # 20% federal + 3.8% NIIT
+    SHORT_TERM_TAX_RATE = TLHConfig.SHORT_TERM_TAX_RATE
+    LONG_TERM_TAX_RATE = TLHConfig.LONG_TERM_TAX_RATE
     
-    # Transaction costs (most brokers are $0 now, but include for realism)
-    COMMISSION_PER_TRADE = 0.0
-    SPREAD_BPS = 1  # 1 basis point for spread cost
+    # Transaction costs
+    COMMISSION_PER_TRADE = TLHConfig.COMMISSION_PER_TRADE
+    SPREAD_BPS = TLHConfig.SPREAD_BPS
     
     # Wash sale
-    WASH_SALE_DAYS = 30
+    WASH_SALE_DAYS = TLHConfig.WASH_SALE_DAYS
     
     # Correlation parameters
-    CORRELATION_LOOKBACK = 90
+    CORRELATION_LOOKBACK = TLHConfig.CORRELATION_LOOKBACK_DAYS
     
     # Output
-    RESULTS_DIR = 'backtest_results'
+    RESULTS_DIR = TLHConfig.RESULTS_DIR
     
 # ============================================================================
 # DATA MODELS
@@ -132,7 +140,16 @@ class TLHBacktester:
         self.data_loader = BacktestDataLoader(use_filtered=True)
         self.data_loader.load_data()
         
-        # State
+        # Create execution engine
+        self.execution_engine = BacktestExecutionEngine(
+            self.data_loader,
+            params.INITIAL_CAPITAL,
+            params.COMMISSION_PER_TRADE,
+            params.SPREAD_BPS,
+            logger=None
+        )
+        
+        # State for tracking (for results calculation)
         self.positions: Dict[str, BacktestPosition] = {}
         self.cash = params.INITIAL_CAPITAL
         self.trades: List[BacktestTrade] = []
@@ -143,6 +160,7 @@ class TLHBacktester:
         # Setup logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+        self.execution_engine.logger = self.logger
     
     def get_trading_dates(self, start_date: datetime, end_date: datetime) -> List[datetime]:
         """Get all trading dates in the backtest period"""
@@ -168,22 +186,8 @@ class TLHBacktester:
     
     def get_price(self, symbol: str, date: datetime) -> Optional[float]:
         """Get price for a symbol on a date"""
-        price = self.data_loader.get_price(symbol, date)
-        
-        # Handle NaN or invalid prices
-        if price is None or pd.isna(price) or price <= 0:
-            # Try to get price from nearby dates (up to 5 days before)
-            for days_back in range(1, 6):
-                alt_date = date - timedelta(days=days_back)
-                alt_price = self.data_loader.get_price(symbol, alt_date)
-                if alt_price and not pd.isna(alt_price) and alt_price > 0:
-                    self.logger.warning(f"Using price from {days_back} days before for {symbol} on {date.date()}")
-                    return alt_price
-            
-            self.logger.warning(f"Invalid price for {symbol} on {date}")
-            return None
-        
-        return price
+        self.execution_engine.set_current_date(date)
+        return self.execution_engine.get_price(symbol, date)
     
     def calculate_transaction_cost(self, quantity: float, price: float) -> Tuple[float, float]:
         """Calculate transaction costs"""
@@ -193,53 +197,48 @@ class TLHBacktester:
     
     def execute_buy(self, symbol: str, date: datetime, amount: float) -> bool:
         """Execute a buy order"""
+        self.execution_engine.set_current_date(date)
         price = self.get_price(symbol, date)
         if not price or price <= 0:
-            self.logger.warning(f"Invalid price for {symbol} on {date}")
-            return False
-        
-        commission, spread = self.calculate_transaction_cost(1, amount)
-        total_cost = amount + commission + spread
-        
-        if self.cash < total_cost:
-            self.logger.warning(f"Insufficient cash: need ${total_cost:.2f}, have ${self.cash:.2f}")
             return False
         
         quantity = amount / price
+        success = self.execution_engine.execute_buy(symbol, quantity, price, date)
         
-        # Update position
-        if symbol in self.positions:
-            # Add to existing position (average cost basis)
-            pos = self.positions[symbol]
-            new_qty = pos.quantity + quantity
-            new_cost = pos.cost_basis + amount
-            pos.quantity = new_qty
-            pos.cost_basis = new_cost
-        else:
-            self.positions[symbol] = BacktestPosition(
+        if success:
+            # Update internal tracking
+            self.cash = self.execution_engine.cash
+            if symbol in self.execution_engine.positions:
+                pos = self.execution_engine.positions[symbol]
+                if symbol in self.positions:
+                    # Update existing
+                    self.positions[symbol].quantity = pos.quantity
+                    self.positions[symbol].cost_basis = pos.cost_basis
+                else:
+                    # Create new
+                    self.positions[symbol] = BacktestPosition(
+                        symbol=pos.symbol,
+                        quantity=pos.quantity,
+                        cost_basis=pos.cost_basis,
+                        purchase_date=pos.purchase_date
+                    )
+            
+            # Record trade
+            commission, spread = self.execution_engine.calculate_transaction_cost(quantity, price)
+            trade = BacktestTrade(
+                date=date,
+                type='buy',
                 symbol=symbol,
                 quantity=quantity,
-                cost_basis=amount,
-                purchase_date=date
+                price=price,
+                commission=commission,
+                spread_cost=spread,
+                total_cost=amount + commission + spread,
+                notes=f"Buy {symbol}"
             )
+            self.trades.append(trade)
         
-        self.cash -= total_cost
-        
-        # Record trade
-        trade = BacktestTrade(
-            date=date,
-            type='buy',
-            symbol=symbol,
-            quantity=quantity,
-            price=price,
-            commission=commission,
-            spread_cost=spread,
-            total_cost=total_cost,
-            notes=f"Buy {symbol}"
-        )
-        self.trades.append(trade)
-        
-        return True
+        return success
     
     def execute_sell(self, symbol: str, date: datetime, reason: str = "") -> Optional[float]:
         """Execute a sell order, returns realized P&L"""
@@ -247,42 +246,39 @@ class TLHBacktester:
             return None
         
         pos = self.positions[symbol]
+        self.execution_engine.set_current_date(date)
         price = self.get_price(symbol, date)
         
         if not price or price <= 0:
-            self.logger.warning(f"Invalid price for {symbol} on {date}")
             return None
         
-        proceeds = pos.quantity * price
-        commission, spread = self.calculate_transaction_cost(pos.quantity, price)
-        net_proceeds = proceeds - commission - spread
+        realized_pnl = self.execution_engine.execute_sell(symbol, pos.quantity, price, date)
         
-        # Calculate realized P&L
-        realized_pnl = net_proceeds - pos.cost_basis
-        
-        self.cash += net_proceeds
-        
-        # Record trade
-        trade = BacktestTrade(
-            date=date,
-            type='sell',
-            symbol=symbol,
-            quantity=pos.quantity,
-            price=price,
-            commission=commission,
-            spread_cost=spread,
-            total_cost=proceeds,
-            notes=f"Sell {symbol}: {reason}, P&L: ${realized_pnl:.2f}"
-        )
-        self.trades.append(trade)
-        
-        # Track wash sale
-        if realized_pnl < 0:
-            self.wash_sales[symbol] = date
-            self.total_losses_harvested += abs(realized_pnl)
-        
-        # Remove position
-        del self.positions[symbol]
+        if realized_pnl is not None:
+            # Update internal tracking
+            self.cash = self.execution_engine.cash
+            if symbol in self.positions:
+                del self.positions[symbol]
+            
+            # Record trade
+            commission, spread = self.execution_engine.calculate_transaction_cost(pos.quantity, price)
+            trade = BacktestTrade(
+                date=date,
+                type='sell',
+                symbol=symbol,
+                quantity=pos.quantity,
+                price=price,
+                commission=commission,
+                spread_cost=spread,
+                total_cost=pos.quantity * price,
+                notes=f"Sell {symbol}: {reason}, P&L: ${realized_pnl:.2f}"
+            )
+            self.trades.append(trade)
+            
+            # Track wash sale
+            if realized_pnl < 0:
+                self.wash_sales[symbol] = date
+                self.total_losses_harvested += abs(realized_pnl)
         
         return realized_pnl
     
@@ -292,131 +288,41 @@ class TLHBacktester:
             return False
         
         sale_date = self.wash_sales[symbol]
-        days_since = (check_date - sale_date).days
-        return days_since < self.params.WASH_SALE_DAYS
-    
-    def calculate_correlations(self, target: str, candidates: List[str], 
-                               date: datetime) -> pd.Series:
-        """Calculate correlations for replacement selection"""
-        end_date = date
-        start_date = date - timedelta(days=self.params.CORRELATION_LOOKBACK)
-        
-        # Get returns for all symbols
-        returns_dict = {}
-        
-        for symbol in [target] + candidates:
-            prices = self.data_loader.get_prices_range(symbol, start_date, end_date)
-            if len(prices) > 20:  # Need minimum data
-                returns = prices['close'].pct_change().dropna()
-                # Remove any NaN or inf values
-                returns = returns.replace([np.inf, -np.inf], np.nan).dropna()
-                if len(returns) > 20:  # Still have enough after cleaning
-                    returns_dict[symbol] = returns
-        
-        if target not in returns_dict or len(returns_dict) < 2:
-            self.logger.warning(f"Insufficient data to calculate correlations for {target}")
-            return pd.Series()
-        
-        # Align returns on dates
-        returns_df = pd.DataFrame(returns_dict)
-        returns_df = returns_df.dropna(how='any')  # Only use dates with all data
-        
-        if len(returns_df) < 20:
-            self.logger.warning(f"Only {len(returns_df)} overlapping dates for correlation calculation")
-            return pd.Series()
-        
-        if target not in returns_df.columns:
-            return pd.Series()
-        
-        # Calculate correlation
-        try:
-            corr = returns_df.corr()[target]
-            corr = corr.drop(target)
-            
-            # Remove NaN correlations
-            corr = corr.dropna()
-            
-            if corr.empty:
-                self.logger.warning(f"No valid correlations calculated for {target}")
-                return pd.Series()
-            
-            return corr.sort_values(ascending=False)
-        except Exception as e:
-            self.logger.error(f"Error calculating correlations for {target}: {e}")
-            return pd.Series()
+        return TLHStrategy.is_wash_sale_active(symbol, sale_date, check_date, self.params.WASH_SALE_DAYS)
     
     def find_replacement(self, sold_symbol: str, date: datetime) -> Optional[str]:
-        """Find replacement stock using hybrid approach"""
+        """Find replacement stock using core strategy"""
+        self.execution_engine.set_current_date(date)
+        
+        # Get available symbols, current positions, and wash sale symbols
+        available_symbols = self.execution_engine.get_available_symbols()
+        current_positions = list(self.positions.keys())
+        wash_sale_symbols = [
+            sym for sym, sale_date in self.wash_sales.items()
+            if TLHStrategy.is_wash_sale_active(sym, sale_date, date, self.params.WASH_SALE_DAYS)
+        ]
+        
+        # Get metadata in the format expected by strategy
         metadata = self.data_loader.metadata
         
-        if sold_symbol not in metadata:
-            return None
+        # Create price data function for strategy
+        def price_data_func(symbol, start_date, end_date):
+            return self.execution_engine.get_prices_range(symbol, start_date, end_date)
         
-        sold_meta = metadata[sold_symbol]
+        # Use core strategy to find replacement
+        replacement = TLHStrategy.find_replacement(
+            sold_symbol=sold_symbol,
+            available_symbols=available_symbols,
+            current_positions=current_positions,
+            wash_sale_symbols=wash_sale_symbols,
+            metadata=metadata,
+            price_data_func=price_data_func,
+            correlation_lookback_days=self.params.CORRELATION_LOOKBACK,
+            current_date=date,
+            logger=self.logger
+        )
         
-        # Get all available symbols (not in positions, not in wash sale)
-        available = [
-            sym for sym in self.data_loader.selected_symbols
-            if sym != sold_symbol 
-            and sym not in self.positions
-            and not self.is_wash_sale_restricted(sym, date)
-        ]
-        
-        if not available:
-            self.logger.warning(f"No replacement candidates for {sold_symbol}")
-            return None
-        
-        # Filter by sector and market cap tier
-        def get_tier(market_cap):
-            if market_cap > 200e9:
-                return "Mega"
-            elif market_cap > 10e9:
-                return "Large"
-            return "Mid"
-        
-        sold_tier = get_tier(sold_meta.get('market_cap', 0))
-        
-        same_sector = [
-            sym for sym in available
-            if sym in metadata
-            and metadata[sym].get('sector') == sold_meta.get('sector')
-            and get_tier(metadata[sym].get('market_cap', 0)) == sold_tier
-        ]
-        
-        # If no same-sector matches, use same tier
-        if not same_sector:
-            same_sector = [
-                sym for sym in available
-                if sym in metadata
-                and get_tier(metadata[sym].get('market_cap', 0)) == sold_tier
-            ]
-        
-        # If still none, use all available
-        if not same_sector:
-            same_sector = available
-        
-        # Calculate correlations
-        correlations = self.calculate_correlations(sold_symbol, same_sector, date)
-        
-        if correlations.empty:
-            # Fallback: select by market cap if correlations fail
-            self.logger.warning(f"Correlation calculation failed for {sold_symbol}, using market cap ranking")
-            
-            # Sort candidates by market cap
-            candidates_with_mcap = [
-                (sym, metadata[sym].get('market_cap', 0)) 
-                for sym in same_sector 
-                if sym in metadata
-            ]
-            candidates_with_mcap.sort(key=lambda x: x[1], reverse=True)
-            
-            if candidates_with_mcap:
-                return candidates_with_mcap[0][0]
-            
-            # Last resort: first available symbol
-            return same_sector[0] if same_sector else None
-        
-        return correlations.idxmax()
+        return replacement
     
     def initialize_portfolio(self, start_date: datetime, symbols: List[str]):
         """Initialize portfolio with equal-weight positions"""
@@ -433,8 +339,9 @@ class TLHBacktester:
         self.logger.info(f"Cash remaining: ${self.cash:,.2f}")
     
     def run_harvest_cycle(self, date: datetime):
-        """Run tax loss harvesting for current positions"""
+        """Run tax loss harvesting for current positions using core strategy"""
         harvests = 0
+        self.execution_engine.set_current_date(date)
         
         for symbol in list(self.positions.keys()):
             pos = self.positions[symbol]
@@ -444,16 +351,16 @@ class TLHBacktester:
                 self.logger.warning(f"Skipping {symbol} - no valid price on {date.date()}")
                 continue
             
-            # Calculate P&L
+            # Calculate P&L using core strategy
             current_value = pos.quantity * current_price
-            pnl = current_value - pos.cost_basis
-            pnl_pct = pnl / pos.cost_basis
+            should_harvest, pnl_pct = TLHStrategy.should_harvest(
+                pos.cost_basis, current_value, self.params.HARVEST_THRESHOLD
+            )
             
-            # Check if loss exceeds threshold
-            if pnl_pct < -self.params.HARVEST_THRESHOLD:
+            if should_harvest:
                 self.logger.info(f"{date.date()}: Harvesting {symbol} with {pnl_pct:.2%} loss")
                 
-                # Find replacement
+                # Find replacement using core strategy
                 replacement = self.find_replacement(symbol, date)
                 
                 if replacement:

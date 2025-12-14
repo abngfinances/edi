@@ -34,37 +34,8 @@ import argparse
 # CONFIGURATION
 # ============================================================================
 
-class Config:
-    """System configuration"""
-    # API Keys
-    ALPACA_API_KEY = os.getenv('ALPACA_API_KEY', '')
-    ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY', '')
-    ALPACA_BASE_URL = os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
-    FMP_API_KEY = os.getenv('FMP_API_KEY', '')
-    
-    # Trading Parameters
-    INITIAL_CAPITAL = 10000.0
-    NUM_STOCKS = 100
-    HARVEST_THRESHOLD = 0.005  # 0.5% loss threshold
-    CORRELATION_LOOKBACK_DAYS = 90
-    
-    # Schedule
-    TRADING_HOUR = 14  # 2 PM ET
-    HARVEST_FREQUENCY = 'weekly'
-    
-    # Wash Sale
-    WASH_SALE_DAYS = 30
-    
-    # File paths
-    DATA_DIR = 'data'
-    POSITIONS_FILE = f'{DATA_DIR}/positions.json'
-    TRANSACTIONS_FILE = f'{DATA_DIR}/transactions.json'
-    WASH_SALES_FILE = f'{DATA_DIR}/wash_sales.json'
-    METADATA_FILE = f'{DATA_DIR}/sp500_metadata.json'
-    
-    # Logging
-    LOG_FILE = f'{DATA_DIR}/tlh_system.log'
-    LOG_LEVEL = logging.INFO
+# Use unified config
+from strategy.config import TLHConfig as Config
 
 # ============================================================================
 # DATA MODELS
@@ -289,11 +260,28 @@ class DataManager:
 # CORE SYSTEM
 # ============================================================================
 
+# Import core strategy and execution engines
+from strategy.core import TLHStrategy
+from strategy.paper_trade_engine import PaperTradeExecutionEngine
+from strategy.live_trade_engine import LiveTradeExecutionEngine
+
 class TaxLossHarvestingSystem:
-    def __init__(self):
-        self.alpaca = AlpacaClient()
+    def __init__(self, mode: str = 'paper'):
+        """
+        Initialize TLH system.
+        
+        Args:
+            mode: 'paper' for paper trading, 'live' for live trading
+        """
+        self.mode = mode
         self.fmp = FMPClient()
         self.metadata: Dict[str, StockMetadata] = {}
+        
+        # Create execution engine based on mode
+        if mode == 'live':
+            self.execution_engine = LiveTradeExecutionEngine(logger=logger)
+        else:
+            self.execution_engine = PaperTradeExecutionEngine(logger=logger)
     
     def setup_portfolio(self, capital: float):
         """Initial portfolio setup"""
@@ -333,59 +321,57 @@ class TaxLossHarvestingSystem:
         DataManager.save_json(Config.METADATA_FILE, cache_data)
     
     def _select_stocks(self, sp500: List[str], n: int) -> List[str]:
-        """Select n stocks from S&P 500"""
-        df = pd.DataFrame([
-            {'symbol': s, 'market_cap': self.metadata[s].market_cap,
-             'sector': self.metadata[s].sector}
-            for s in sp500 if s in self.metadata
-        ]).sort_values('market_cap', ascending=False)
+        """Select n stocks from S&P 500 using core strategy"""
+        # Convert metadata to dict format expected by strategy
+        metadata_dict = {}
+        for symbol, meta in self.metadata.items():
+            metadata_dict[symbol] = {
+                'market_cap': meta.market_cap,
+                'sector': meta.sector,
+                'industry': meta.industry
+            }
         
-        # Top 50 by market cap
-        selected = df.head(50)['symbol'].tolist()
-        
-        # Distribute remaining by sector
-        remaining_df = df[~df['symbol'].isin(selected)]
-        for sector in remaining_df['sector'].unique():
-            sector_df = remaining_df[remaining_df['sector'] == sector]
-            count = min(5, len(sector_df))
-            selected.extend(sector_df.head(count)['symbol'].tolist())
-        
-        return selected[:n]
+        # Use core strategy
+        return TLHStrategy.select_stocks(sp500, n, metadata_dict)
     
     def _initialize_positions(self, symbols: List[str], capital: float):
-        """Buy initial positions"""
+        """Buy initial positions using execution engine"""
         per_stock = capital / len(symbols)
         positions = {}
         
         for sym in symbols:
             try:
-                trade = self.alpaca.get_latest_trade(sym)
-                price = trade['trade']['p']
+                price = self.execution_engine.get_price(sym)
+                if not price:
+                    logger.warning(f"Skip {sym}: no price available")
+                    continue
+                
                 qty = per_stock / price
                 
                 if qty < 0.01:
                     logger.warning(f"Skip {sym}: qty too small")
                     continue
                 
-                self.alpaca.place_order(sym, qty, 'buy')
+                success = self.execution_engine.execute_buy(sym, qty, price)
                 
-                positions[sym] = Position(
-                    symbol=sym,
-                    quantity=qty,
-                    cost_basis=qty * price,
-                    purchase_date=datetime.now().isoformat()
-                )
-                
-                DataManager.add_transaction(Transaction(
-                    timestamp=datetime.now().isoformat(),
-                    type='buy',
-                    symbol=sym,
-                    quantity=qty,
-                    price=price,
-                    fees=0.0,
-                    total=qty * price,
-                    notes="Initial"
-                ))
+                if success:
+                    positions[sym] = Position(
+                        symbol=sym,
+                        quantity=qty,
+                        cost_basis=qty * price,
+                        purchase_date=datetime.now().isoformat()
+                    )
+                    
+                    DataManager.add_transaction(Transaction(
+                        timestamp=datetime.now().isoformat(),
+                        type='buy',
+                        symbol=sym,
+                        quantity=qty,
+                        price=price,
+                        fees=0.0,
+                        total=qty * price,
+                        notes="Initial"
+                    ))
                 
                 time.sleep(0.1)
             except Exception as e:
@@ -398,7 +384,7 @@ class TaxLossHarvestingSystem:
         logger.info(f"Created {len(positions)} positions")
     
     def run_harvest(self):
-        """Execute tax loss harvesting"""
+        """Execute tax loss harvesting using core strategy"""
         logger.info("Starting harvest cycle")
         
         positions = DataManager.load_positions()
@@ -413,21 +399,49 @@ class TaxLossHarvestingSystem:
         for sym, pos in positions.items():
             try:
                 # Get current price
-                trade = self.alpaca.get_latest_trade(sym)
-                curr_price = trade['trade']['p']
+                curr_price = self.execution_engine.get_price(sym)
+                if not curr_price:
+                    continue
                 
-                # Calculate P&L
+                # Calculate P&L using core strategy
                 curr_value = pos.quantity * curr_price
-                pnl = curr_value - pos.cost_basis
-                pnl_pct = pnl / pos.cost_basis
+                should_harvest, pnl_pct = TLHStrategy.should_harvest(
+                    pos.cost_basis, curr_value, Config.HARVEST_THRESHOLD
+                )
                 
-                # Check if loss exceeds threshold
-                if pnl_pct < -Config.HARVEST_THRESHOLD:
+                if should_harvest:
                     logger.info(f"{sym}: Loss {pnl_pct:.2%}, harvesting")
                     
-                    # Find replacement
-                    available = [s for s in positions.keys() if s not in active_wash]
-                    replacement = self._find_replacement(sym, available, active_wash)
+                    # Find replacement using core strategy
+                    available_symbols = self.execution_engine.get_available_symbols()
+                    if not available_symbols:
+                        # Fallback to all positions
+                        available_symbols = list(positions.keys())
+                    
+                    # Convert metadata to dict format
+                    metadata_dict = {}
+                    for symbol, meta in self.metadata.items():
+                        metadata_dict[symbol] = {
+                            'market_cap': meta.market_cap,
+                            'sector': meta.sector,
+                            'industry': meta.industry
+                        }
+                    
+                    # Create price data function
+                    def price_data_func(symbol, start_date, end_date):
+                        return self.execution_engine.get_prices_range(symbol, start_date, end_date)
+                    
+                    replacement = TLHStrategy.find_replacement(
+                        sold_symbol=sym,
+                        available_symbols=available_symbols,
+                        current_positions=list(positions.keys()),
+                        wash_sale_symbols=active_wash,
+                        metadata=metadata_dict,
+                        price_data_func=price_data_func,
+                        correlation_lookback_days=Config.CORRELATION_LOOKBACK_DAYS,
+                        current_date=now,
+                        logger=logger
+                    )
                     
                     if replacement:
                         self._execute_harvest(pos, replacement, curr_price)
@@ -439,64 +453,16 @@ class TaxLossHarvestingSystem:
         
         logger.info(f"Harvest complete: {harvests_executed} executed")
     
-    def _find_replacement(self, sold: str, available: List[str], 
-                         wash: List[str]) -> Optional[str]:
-        """Find replacement stock"""
-        if sold not in self.metadata:
-            return None
-        
-        sold_meta = self.metadata[sold]
-        candidates = [
-            s for s in available 
-            if s != sold and s not in wash and s in self.metadata
-        ]
-        
-        # Filter by sector and tier
-        same_sector = [
-            s for s in candidates
-            if self.metadata[s].sector == sold_meta.sector
-            and self.metadata[s].market_cap_tier == sold_meta.market_cap_tier
-        ]
-        
-        if not same_sector:
-            same_sector = [
-                s for s in candidates
-                if self.metadata[s].market_cap_tier == sold_meta.market_cap_tier
-            ]
-        
-        if not same_sector:
-            same_sector = candidates
-        
-        # Calculate correlations
-        corrs = self._calc_correlations(sold, same_sector)
-        return corrs.idxmax() if not corrs.empty else None
-    
-    def _calc_correlations(self, target: str, candidates: List[str]) -> pd.Series:
-        """Calculate correlations"""
-        all_syms = [target] + candidates
-        bars = self.alpaca.get_bars(all_syms, limit=90)
-        
-        if not bars or 'bars' not in bars:
-            return pd.Series()
-        
-        prices = {}
-        for s in all_syms:
-            if s in bars['bars']:
-                prices[s] = [b['c'] for b in bars['bars'][s]]
-        
-        if target not in prices:
-            return pd.Series()
-        
-        df = pd.DataFrame(prices)
-        returns = df.pct_change().dropna()
-        corrs = returns.corr()[target].drop(target)
-        
-        return corrs.sort_values(ascending=False)
     
     def _execute_harvest(self, pos: Position, repl: str, price: float):
-        """Execute harvest trade"""
+        """Execute harvest trade using execution engine"""
         # Sell
-        self.alpaca.place_order(pos.symbol, pos.quantity, 'sell')
+        realized_pnl = self.execution_engine.execute_sell(pos.symbol, pos.quantity, price)
+        
+        if realized_pnl is None:
+            logger.error(f"Failed to sell {pos.symbol}")
+            return
+        
         proceeds = pos.quantity * price
         loss = pos.cost_basis - proceeds
         
@@ -519,34 +485,38 @@ class TaxLossHarvestingSystem:
         ))
         
         # Buy replacement
-        repl_trade = self.alpaca.get_latest_trade(repl)
-        repl_price = repl_trade['trade']['p']
+        repl_price = self.execution_engine.get_price(repl)
+        if not repl_price:
+            logger.error(f"Failed to get price for replacement {repl}")
+            return
+        
         repl_qty = proceeds / repl_price
         
-        self.alpaca.place_order(repl, repl_qty, 'buy')
+        success = self.execution_engine.execute_buy(repl, repl_qty, repl_price)
         
-        DataManager.add_transaction(Transaction(
-            timestamp=datetime.now().isoformat(),
-            type='buy',
-            symbol=repl,
-            quantity=repl_qty,
-            price=repl_price,
-            fees=0.0,
-            total=proceeds,
-            notes=f"Replacement for {pos.symbol}"
-        ))
-        
-        # Update positions
-        positions = DataManager.load_positions()
-        positions[repl] = Position(
-            symbol=repl,
-            quantity=repl_qty,
-            cost_basis=proceeds,
-            purchase_date=datetime.now().isoformat()
-        )
-        DataManager.save_positions(positions)
-        
-        logger.info(f"✓ {pos.symbol} -> {repl}, Loss: ${loss:.2f}")
+        if success:
+            DataManager.add_transaction(Transaction(
+                timestamp=datetime.now().isoformat(),
+                type='buy',
+                symbol=repl,
+                quantity=repl_qty,
+                price=repl_price,
+                fees=0.0,
+                total=proceeds,
+                notes=f"Replacement for {pos.symbol}"
+            ))
+            
+            # Update positions
+            positions = DataManager.load_positions()
+            positions[repl] = Position(
+                symbol=repl,
+                quantity=repl_qty,
+                cost_basis=proceeds,
+                purchase_date=datetime.now().isoformat()
+            )
+            DataManager.save_positions(positions)
+            
+            logger.info(f"✓ {pos.symbol} -> {repl}, Loss: ${loss:.2f}")
     
     def generate_tax_report(self, year: int) -> str:
         """Generate Form 8949 report"""
@@ -608,10 +578,12 @@ def main():
     parser.add_argument('--harvest', action='store_true', help='Run harvest cycle')
     parser.add_argument('--tax-report', action='store_true', help='Generate tax report')
     parser.add_argument('--year', type=int, default=datetime.now().year, help='Tax year')
+    parser.add_argument('--mode', choices=['paper', 'live'], default='paper',
+                       help='Trading mode: paper (default) or live')
     
     args = parser.parse_args()
     
-    system = TaxLossHarvestingSystem()
+    system = TaxLossHarvestingSystem(mode=args.mode)
     
     if args.setup:
         system.setup_portfolio(args.capital)
