@@ -474,14 +474,34 @@ class DataDownloader:
             'issues': []
         }
         
+        # Get reference trading days (use SPY as benchmark if available)
+        reference_symbol = None
+        for sym in ['SPY', 'AAPL', 'MSFT', 'GOOGL']:
+            if sym in df['symbol'].unique():
+                reference_symbol = sym
+                break
+        
+        if reference_symbol:
+            reference_data = df[df['symbol'] == reference_symbol]
+            expected_trading_days = len(reference_data)
+            logger.info(f"Using {reference_symbol} as reference: {expected_trading_days} trading days")
+        else:
+            # Fallback: estimate ~252 trading days per year
+            date_range = (df['date'].max() - df['date'].min()).days
+            years = date_range / 365.25
+            expected_trading_days = int(years * 252)
+            logger.info(f"No reference symbol found. Estimating {expected_trading_days} trading days")
+        
         # Check each symbol
         for symbol in df['symbol'].unique():
             symbol_data = df[df['symbol'] == symbol]
             
-            # Check for missing data
-            expected_days = (df['date'].max() - df['date'].min()).days
+            # Check for missing data (compare to expected trading days)
             actual_days = len(symbol_data)
-            completeness = (actual_days / expected_days) * 100
+            completeness = (actual_days / expected_trading_days) * 100
+            
+            # Cap at 100% (some stocks might have more data than reference)
+            completeness = min(completeness, 100.0)
             
             # Check for zero/negative prices
             invalid_prices = (symbol_data['close'] <= 0).sum()
@@ -489,29 +509,59 @@ class DataDownloader:
             # Check for missing values
             missing_values = symbol_data.isnull().sum().sum()
             
+            # Check for data gaps (missing trading days)
+            if len(symbol_data) > 1:
+                symbol_dates = set(symbol_data['date'])
+                all_dates = set(df['date'].unique())
+                missing_dates = len(all_dates - symbol_dates)
+                gap_pct = (missing_dates / len(all_dates)) * 100
+            else:
+                gap_pct = 100.0
+            
             validation_report['data_quality'][symbol] = {
-                'rows': len(symbol_data),
+                'rows': int(actual_days),
                 'completeness_pct': round(completeness, 2),
+                'gap_pct': round(gap_pct, 2),
                 'invalid_prices': int(invalid_prices),
                 'missing_values': int(missing_values)
             }
             
             # Flag issues
-            if completeness < 80:
+            if completeness < 90:
                 validation_report['issues'].append(
-                    f"{symbol}: Only {completeness:.1f}% complete"
+                    f"{symbol}: Only {completeness:.1f}% complete ({actual_days}/{expected_trading_days} days)"
                 )
             if invalid_prices > 0:
                 validation_report['issues'].append(
                     f"{symbol}: {invalid_prices} invalid prices"
                 )
+            if gap_pct > 10:
+                validation_report['issues'].append(
+                    f"{symbol}: {gap_pct:.1f}% data gaps"
+                )
+        
+        # Add summary statistics
+        quality_values = [q['completeness_pct'] for q in validation_report['data_quality'].values()]
+        validation_report['summary'] = {
+            'avg_completeness': round(np.mean(quality_values), 2),
+            'min_completeness': round(np.min(quality_values), 2),
+            'max_completeness': round(np.max(quality_values), 2),
+            'stocks_above_95_pct': sum(1 for v in quality_values if v >= 95),
+            'stocks_above_90_pct': sum(1 for v in quality_values if v >= 90),
+            'total_issues': len(validation_report['issues'])
+        }
         
         # Save validation report
         report_file = f"{BacktestConfig.DATA_DIR}/validation_report.json"
         with open(report_file, 'w') as f:
             json.dump(validation_report, f, indent=2)
         
-        logger.info(f"Validation complete. {len(validation_report['issues'])} issues found")
+        logger.info(f"Validation complete:")
+        logger.info(f"  Average completeness: {validation_report['summary']['avg_completeness']:.1f}%")
+        logger.info(f"  Stocks ≥95% complete: {validation_report['summary']['stocks_above_95_pct']}")
+        logger.info(f"  Stocks ≥90% complete: {validation_report['summary']['stocks_above_90_pct']}")
+        logger.info(f"  Total issues: {validation_report['summary']['total_issues']}")
+        
         if validation_report['issues']:
             logger.warning(f"First 5 issues: {validation_report['issues'][:5]}")
         
