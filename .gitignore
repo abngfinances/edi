@@ -2,3 +2,4 @@
 backtest_data
 credentials
 backtesting/__pycache__
+backtest_results
