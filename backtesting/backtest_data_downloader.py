@@ -85,37 +85,174 @@ class DataDownloader:
         os.makedirs(BacktestConfig.TEMP_PRICE_DIR, exist_ok=True)
     
     def get_sp500_list(self) -> List[str]:
-        """Get current S&P 500 constituents from Wikipedia"""
-        logger.info("Fetching S&P 500 constituents from Wikipedia...")
+        """Get current S&P 500 constituents with multiple fallback methods"""
         
+        # Method 1: Try Wikipedia with proper headers
         try:
-            # Wikipedia has a maintained list of S&P 500 companies
+            logger.info("Fetching S&P 500 constituents from Wikipedia...")
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            tables = pd.read_html(url)
+            
+            # Use requests with headers first
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            
+            # Parse with pandas
+            tables = pd.read_html(response.text)
             sp500_table = tables[0]
             
             symbols = sp500_table['Symbol'].tolist()
-            
-            # Clean symbols (some have special characters)
             symbols = [s.replace('.', '-') for s in symbols]
             
-            # Save to file
             sp500_data = {
                 'symbols': symbols,
                 'download_date': datetime.now().isoformat(),
+                'source': 'wikipedia',
                 'count': len(symbols)
             }
             
             with open(BacktestConfig.SP500_LIST_FILE, 'w') as f:
                 json.dump(sp500_data, f, indent=2)
             
-            logger.info(f"Found {len(symbols)} S&P 500 stocks")
+            logger.info(f"✓ Found {len(symbols)} S&P 500 stocks from Wikipedia")
             self.sp500_symbols = symbols
             return symbols
             
         except Exception as e:
-            logger.error(f"Error fetching S&P 500 list: {e}")
-            return []
+            logger.warning(f"Wikipedia fetch failed: {e}")
+        
+        # Method 2: Try slickcharts.com (alternative source)
+        try:
+            logger.info("Trying alternate source: slickcharts.com...")
+            url = 'https://www.slickcharts.com/sp500'
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            
+            tables = pd.read_html(response.text)
+            sp500_table = tables[0]
+            
+            # Different column name on slickcharts
+            if 'Symbol' in sp500_table.columns:
+                symbols = sp500_table['Symbol'].tolist()
+            elif 'Ticker' in sp500_table.columns:
+                symbols = sp500_table['Ticker'].tolist()
+            else:
+                raise ValueError("Could not find symbol column")
+            
+            symbols = [str(s).replace('.', '-') for s in symbols]
+            
+            sp500_data = {
+                'symbols': symbols,
+                'download_date': datetime.now().isoformat(),
+                'source': 'slickcharts',
+                'count': len(symbols)
+            }
+            
+            with open(BacktestConfig.SP500_LIST_FILE, 'w') as f:
+                json.dump(sp500_data, f, indent=2)
+            
+            logger.info(f"✓ Found {len(symbols)} S&P 500 stocks from slickcharts")
+            self.sp500_symbols = symbols
+            return symbols
+            
+        except Exception as e:
+            logger.warning(f"Slickcharts fetch failed: {e}")
+        
+        # Method 3: Use hardcoded list of major S&P 500 stocks
+        logger.warning("All online sources failed. Using hardcoded fallback list...")
+        
+        # Top ~200 S&P 500 stocks by market cap (as of Dec 2024)
+        hardcoded_symbols = [
+            # Mega cap tech (Top 10)
+            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'GOOG', 'AVGO',
+            
+            # Large cap tech (11-40)
+            'ORCL', 'ADBE', 'CRM', 'CSCO', 'ACN', 'INTC', 'AMD', 'QCOM', 'IBM', 'TXN',
+            'INTU', 'AMAT', 'MU', 'ADI', 'LRCX', 'KLAC', 'SNPS', 'CDNS', 'MCHP', 'FTNT',
+            'PANW', 'CRWD', 'ADSK', 'WDAY', 'ABNB', 'DDOG', 'SNOW', 'ZS', 'NET', 'NOW',
+            
+            # Financials (41-70)
+            'JPM', 'V', 'MA', 'BAC', 'WFC', 'GS', 'MS', 'SPGI', 'BLK', 'C', 'AXP',
+            'SCHW', 'CB', 'MMC', 'PGR', 'AON', 'ICE', 'CME', 'MCO', 'TRV', 'ALL',
+            'USB', 'PNC', 'TFC', 'COF', 'AIG', 'MET', 'PRU', 'AFL', 'HIG',
+            
+            # Healthcare (71-100)
+            'UNH', 'JNJ', 'LLY', 'ABBV', 'MRK', 'TMO', 'ABT', 'DHR', 'PFE', 'AMGN',
+            'CVS', 'BMY', 'ELV', 'GILD', 'MDT', 'CI', 'REGN', 'VRTX', 'HUM', 'ISRG',
+            'ZTS', 'BSX', 'SYK', 'EW', 'IDXX', 'A', 'IQV', 'RMD', 'DXCM', 'ALGN',
+            
+            # Consumer Discretionary (101-130)
+            'AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'TGT', 'LOW', 'TJX', 'BKNG',
+            'CMG', 'MAR', 'DHI', 'LEN', 'YUM', 'GM', 'F', 'ORLY', 'AZO', 'RCL',
+            'CCL', 'HLT', 'MGM', 'WYNN', 'LVS', 'POOL', 'ULTA', 'DRI', 'ROST', 'BBY',
+            
+            # Consumer Staples (131-150)
+            'WMT', 'PG', 'COST', 'KO', 'PEP', 'PM', 'MO', 'CL', 'MDLZ', 'GIS',
+            'KMB', 'KHC', 'HSY', 'K', 'CAG', 'SJM', 'CPB', 'CHD', 'CLX', 'TSN',
+            
+            # Communications (151-165)
+            'NFLX', 'DIS', 'CMCSA', 'T', 'VZ', 'TMUS', 'CHTR', 'EA', 'NXST', 'TTWO',
+            'MTCH', 'FOXA', 'FOX', 'PARA', 'OMC',
+            
+            # Industrials (166-195)
+            'CAT', 'BA', 'UNP', 'HON', 'UPS', 'RTX', 'LMT', 'DE', 'GE', 'MMM',
+            'NOC', 'FDX', 'EMR', 'ETN', 'ITW', 'PH', 'CSX', 'NSC', 'GD', 'TDG',
+            'CARR', 'OTIS', 'WM', 'RSG', 'FAST', 'PCAR', 'VRSK', 'IEX', 'ROK', 'DOV',
+            
+            # Energy (196-210)
+            'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'PXD', 'MPC', 'PSX', 'VLO', 'OXY',
+            'HAL', 'BKR', 'KMI', 'WMB', 'OKE',
+            
+            # Materials (211-225)
+            'LIN', 'APD', 'ECL', 'SHW', 'FCX', 'NEM', 'CTVA', 'DD', 'PPG', 'NUE',
+            'VMC', 'MLM', 'STLD', 'CF', 'MOS',
+            
+            # Utilities (226-240)
+            'NEE', 'DUK', 'SO', 'D', 'AEP', 'EXC', 'SRE', 'XEL', 'ES', 'PEG',
+            'ED', 'WEC', 'AWK', 'DTE', 'ETR',
+            
+            # Real Estate (241-255)
+            'PLD', 'AMT', 'EQIX', 'CCI', 'PSA', 'WELL', 'SPG', 'O', 'DLR', 'VICI',
+            'AVB', 'EQR', 'INVH', 'MAA', 'ESS',
+            
+            # Additional quality stocks to reach ~200
+            'GRMN', 'MKTX', 'TYL', 'PAYC', 'ADP', 'PAYX', 'BR', 'FIS', 'FISV', 'GPN',
+            'TROW', 'BEN', 'IVZ', 'STT', 'NTRS', 'BK', 'BBT', 'RF', 'KEY', 'CFG',
+            'FITB', 'HBAN', 'MTB', 'ZION', 'CMA', 'SIVB', 'ALLY', 'NAVI', 'DFS', 'SYF'
+        ]
+        
+        # Remove duplicates and clean
+        symbols = list(set(hardcoded_symbols))
+        symbols.sort()
+        
+        sp500_data = {
+            'symbols': symbols,
+            'download_date': datetime.now().isoformat(),
+            'source': 'hardcoded_fallback',
+            'count': len(symbols),
+            'note': 'Using hardcoded list of ~200 major S&P 500 stocks. Not complete list but sufficient for backtesting.'
+        }
+        
+        with open(BacktestConfig.SP500_LIST_FILE, 'w') as f:
+            json.dump(sp500_data, f, indent=2)
+        
+        logger.info(f"✓ Using {len(symbols)} hardcoded S&P 500 stocks")
+        logger.warning("⚠️  Using fallback list - covers major stocks but not all 500")
+        self.sp500_symbols = symbols
+        return symbols
     
     def download_metadata_yfinance(self, symbols: List[str]) -> Dict:
         """Download stock metadata using yfinance"""
@@ -752,4 +889,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
