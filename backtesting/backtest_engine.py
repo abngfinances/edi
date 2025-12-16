@@ -156,6 +156,9 @@ class TLHBacktester:
         self.wash_sales: Dict[str, datetime] = {}  # symbol -> sale_date
         self.daily_values: List[Dict] = []
         self.total_losses_harvested = 0.0
+        # Track the initial portfolio composition (set in initialize_portfolio)
+        self.initial_symbols: List[str] = []
+        self.initial_sector_counts: Dict[str, int] = {}
         
         # Setup logging
         logging.basicConfig(level=logging.INFO)
@@ -328,6 +331,10 @@ class TLHBacktester:
         """Initialize portfolio with equal-weight positions"""
         self.logger.info(f"Initializing portfolio on {start_date} with {len(symbols)} stocks")
         
+        # Record the initial target symbols and sector composition
+        self.initial_symbols = list(symbols)
+        self.initial_sector_counts = self._compute_initial_sector_counts()
+
         amount_per_stock = self.params.INITIAL_CAPITAL / len(symbols)
         
         successful = 0
@@ -382,7 +389,130 @@ class TLHBacktester:
                 else:
                     self.logger.warning(f"  Could not find replacement for {symbol}")
         
+        # After running harvests, attempt to refill any missing positions
+        try:
+            fills = self.fill_missing_positions(date)
+            if self.logger and fills > 0:
+                self.logger.info(f"{date.date()}: Performed {fills} fills after harvest")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error during post-harvest refill: {e}")
+
         return harvests
+
+    def _compute_initial_sector_counts(self):
+        """Compute sector counts from `self.initial_symbols` using metadata."""
+        counts: Dict[str, int] = {}
+        metadata = self.data_loader.metadata if hasattr(self.data_loader, 'metadata') else {}
+        for sym in self.initial_symbols:
+            sector = metadata.get(sym, {}).get('sector', 'Unknown')
+            counts[sector] = counts.get(sector, 0) + 1
+        return counts
+
+    def fill_missing_positions(self, date: datetime) -> int:
+        """
+        Attempt to refill portfolio up to `params.NUM_STOCKS` after a harvest cycle.
+
+        Strategy:
+        - Prefer sectors that are under-represented vs the initial composition.
+        - Avoid symbols that are currently in positions or are in wash sale.
+        - Use available symbols from the execution engine / data loader and pick by market cap.
+        - Buy an ~equal allocation per position (INITIAL_CAPITAL / NUM_STOCKS) or remaining cash.
+        """
+        buys = 0
+        target = int(self.params.NUM_STOCKS)
+        if target <= 0:
+            return buys
+
+        # Build current sector counts
+        metadata = self.data_loader.metadata if hasattr(self.data_loader, 'metadata') else {}
+        current_sector_counts: Dict[str, int] = {}
+        for sym in self.positions.keys():
+            sector = metadata.get(sym, {}).get('sector', 'Unknown')
+            current_sector_counts[sector] = current_sector_counts.get(sector, 0) + 1
+
+        # Ensure we have initial sector counts
+        if not self.initial_sector_counts and self.initial_symbols:
+            self.initial_sector_counts = self._compute_initial_sector_counts()
+
+        # Compute deficits by sector (initial - current)
+        sector_deficits: Dict[str, int] = {}
+        for sector, init_count in self.initial_sector_counts.items():
+            cur = current_sector_counts.get(sector, 0)
+            if init_count > cur:
+                sector_deficits[sector] = init_count - cur
+
+        available = self.execution_engine.get_available_symbols()
+        wash_sale_symbols = [sym for sym, sale_date in self.wash_sales.items()
+                             if TLHStrategy.is_wash_sale_active(sym, sale_date, date, self.params.WASH_SALE_DAYS)]
+
+        # While we have room and cash, try to fill by sector deficits first
+        allocation_per_position = max(1.0, self.params.INITIAL_CAPITAL / max(1, target))
+
+        # Helper to pick candidate for a sector
+        def pick_candidate_for_sector(sector: str):
+            candidates = [s for s in available
+                          if s not in self.positions
+                          and s not in wash_sale_symbols
+                          and s in metadata
+                          and metadata[s].get('sector', 'Unknown') == sector]
+            # Sort by market cap desc
+            candidates.sort(key=lambda x: metadata.get(x, {}).get('market_cap', 0), reverse=True)
+            return candidates[0] if candidates else None
+
+        # First pass: fill sector deficits
+        for sector, deficit in sorted(sector_deficits.items(), key=lambda x: -x[1]):
+            for _ in range(deficit):
+                if len(self.positions) >= target or self.cash <= 0:
+                    break
+                candidate = pick_candidate_for_sector(sector)
+                if not candidate:
+                    break
+                price = self.get_price(candidate, date)
+                if not price or price <= 0:
+                    # Skip candidate if no price
+                    # Remove candidate from available for this pass
+                    available = [s for s in available if s != candidate]
+                    continue
+
+                buy_amount = min(allocation_per_position, self.cash)
+                success = self.execute_buy(candidate, date, buy_amount)
+                if success:
+                    buys += 1
+                    # Update current sector counts
+                    current_sector_counts[sector] = current_sector_counts.get(sector, 0) + 1
+                else:
+                    # If buy failed, remove candidate and continue
+                    available = [s for s in available if s != candidate]
+
+        # Second pass: fill any remaining slots from any sector by market cap
+        while len(self.positions) < target and self.cash > 0:
+            # Build candidate list excluding positions and wash sale
+            candidates = [s for s in available if s not in self.positions and s not in wash_sale_symbols and s in metadata]
+            if not candidates:
+                break
+            candidates.sort(key=lambda x: metadata.get(x, {}).get('market_cap', 0), reverse=True)
+            picked = None
+            for c in candidates:
+                price = self.get_price(c, date)
+                if price and price > 0:
+                    picked = c
+                    break
+            if not picked:
+                break
+
+            buy_amount = min(allocation_per_position, self.cash)
+            success = self.execute_buy(picked, date, buy_amount)
+            if success:
+                buys += 1
+            else:
+                # Remove and continue
+                available = [s for s in available if s != picked]
+
+        if buys > 0 and self.logger:
+            self.logger.info(f"{date.date()}: Filled {buys} missing positions to restore target composition")
+
+        return buys
     
     def calculate_portfolio_value(self, date: datetime) -> float:
         """Calculate total portfolio value on a date"""
