@@ -545,6 +545,24 @@ class TLHBacktester:
         
         # Initialize portfolio
         self.initialize_portfolio(trading_dates[0], self.data_loader.selected_symbols[:self.params.NUM_STOCKS])
+
+        # Ensure reference index (SPY) is present in the loaded price data
+        try:
+            symbols_available = set(self.data_loader.prices_df['symbol'].unique())
+        except Exception:
+            symbols_available = set()
+
+        if 'SPY' not in symbols_available:
+            msg = (
+                "Reference index 'SPY' not found in backtest price data.\n"
+                "Please download index price data (e.g., add SPY to the dataset) before running backtests.\n"
+                "Run: python backtesting/backtest_data_downloader.py to refresh data."
+            )
+            # Use logger if available, then exit with non-zero code
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.error(msg)
+            print("ERROR:", msg)
+            sys.exit(1)
         
         # Track daily values
         total_harvests = 0
@@ -592,18 +610,30 @@ class TLHBacktester:
         years = days / 365.25
         annualized_return = (1 + total_return) ** (1 / years) - 1
         
-        # Calculate benchmark (SPY buy-and-hold)
-        spy_start = self.get_price('SPY', start_date)
-        spy_end = self.get_price('SPY', end_date)
-        
-        if spy_start and spy_end:
-            benchmark_return = (spy_end - spy_start) / spy_start
-            benchmark_final = initial_value * (1 + benchmark_return)
-            benchmark_annualized = (1 + benchmark_return) ** (1 / years) - 1
+        # Calculate benchmark (SPY buy-and-hold) using price series
+        try:
+            spy_df = self.execution_engine.get_prices_range('SPY', start_date, end_date)
+        except Exception:
+            spy_df = pd.DataFrame()
+
+        if spy_df is not None and not spy_df.empty and 'close' in spy_df.columns:
+            spy_df = spy_df.sort_values('date')
+            spy_close = spy_df['close'].dropna()
+            if len(spy_close) >= 2:
+                spy_start = float(spy_close.iloc[0])
+                spy_end = float(spy_close.iloc[-1])
+                benchmark_return = (spy_end - spy_start) / spy_start
+                benchmark_final = initial_value * (1 + benchmark_return)
+                benchmark_annualized = (1 + benchmark_return) ** (1 / years) - 1 if years > 0 else 0
+            else:
+                benchmark_return = 0.0
+                benchmark_final = initial_value
+                benchmark_annualized = 0.0
         else:
-            benchmark_return = 0
+            # SPY missing or invalid in price range — fallback to simple zeroed benchmark
+            benchmark_return = 0.0
             benchmark_final = initial_value
-            benchmark_annualized = 0
+            benchmark_annualized = 0.0
         
         # Tax alpha (assumes losses can offset gains at short-term rate)
         tax_alpha = self.total_losses_harvested * self.params.SHORT_TERM_TAX_RATE
@@ -622,21 +652,30 @@ class TLHBacktester:
         drawdown = (df['portfolio_value'] - cummax) / cummax
         max_drawdown = drawdown.min()
         
-        # Tracking error (vs benchmark)
-        if spy_start:
-            spy_prices = []
-            for date in df['date']:
-                spy_price = self.get_price('SPY', date)
-                if spy_price:
-                    spy_prices.append(spy_price)
-                else:
-                    spy_prices.append(np.nan)
-            
-            df['spy_value'] = (np.array(spy_prices) / spy_start) * initial_value
-            tracking_diff = df['portfolio_value'] - df['spy_value']
-            tracking_error = tracking_diff.std() / initial_value
-        else:
-            tracking_error = 0
+        # Tracking error (vs benchmark) — compute on returns, annualized
+        try:
+            # portfolio returns
+            rp = df['portfolio_value'].pct_change().dropna()
+
+            # benchmark returns: use spy_df's close series aligned to trading dates
+            if spy_df is not None and not spy_df.empty and 'close' in spy_df.columns:
+                spy_series = spy_df.set_index('date')['close'].sort_index()
+                # Align spy returns to portfolio dates
+                rb = spy_series.pct_change().dropna()
+                # Align the two series on their intersection
+                rp_aligned, rb_aligned = rp.align(rb.reindex(rp.index, method='nearest'), join='inner')
+            else:
+                rp_aligned = pd.Series()
+                rb_aligned = pd.Series()
+
+            if len(rp_aligned) == 0:
+                tracking_error = 0.0
+            else:
+                # daily tracking error (std of differences), annualize
+                te_daily = np.sqrt(np.mean((rp_aligned - rb_aligned) ** 2))
+                tracking_error = float(te_daily * np.sqrt(252) * 100.0)  # percent
+        except Exception:
+            tracking_error = 0.0
         
         # Trade statistics
         total_trades = len(self.trades)
