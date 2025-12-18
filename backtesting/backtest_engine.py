@@ -36,6 +36,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from strategy.core import TLHStrategy
 from strategy.config import TLHConfig
 from backtesting.backtest_execution_engine import BacktestExecutionEngine
+import os
+
+# Environment-driven runtime settings (validated in TLHBacktester.__init__)
 
 # ============================================================================
 # CONFIGURATION
@@ -161,9 +164,43 @@ class TLHBacktester:
         self.initial_sector_counts: Dict[str, int] = {}
         
         # Setup logging
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig()
+
+        # Validate and apply LOG_LEVEL (default: ERROR)
+        allowed_levels = {
+            'CRITICAL': logging.CRITICAL,
+            'ERROR': logging.ERROR,
+            'WARNING': logging.WARNING,
+            'INFO': logging.INFO,
+            'DEBUG': logging.DEBUG,
+            'NOTSET': logging.NOTSET
+        }
+
+        _log_env = os.getenv('LOG_LEVEL')
+        root = logging.getLogger()
+        if _log_env is None or _log_env == '':
+            root.setLevel(logging.ERROR)
+        else:
+            _lvl = _log_env.upper()
+            if _lvl not in allowed_levels:
+                raise ValueError(f"Invalid LOG_LEVEL '{_log_env}'. Allowed values: {', '.join(allowed_levels.keys())}")
+            root.setLevel(allowed_levels[_lvl])
+
         self.logger = logging.getLogger(__name__)
         self.execution_engine.logger = self.logger
+
+        # Parse BACK_TEST_DAYS: if unset -> None (use full dataset). If set, must be positive int.
+        _bt_env = os.getenv('BACK_TEST_DAYS')
+        if _bt_env is None or _bt_env == '':
+            self.back_test_days = None
+        else:
+            try:
+                _bt_val = int(_bt_env)
+                if _bt_val <= 0:
+                    raise ValueError(f'BACK_TEST_DAYS must be a positive integer')
+                self.back_test_days = _bt_val
+            except Exception:
+                raise ValueError(f"Invalid BACK_TEST_DAYS value: '{_bt_env}'. Must be a positive integer")
     
     def get_trading_dates(self, start_date: datetime, end_date: datetime) -> List[datetime]:
         """Get all trading dates in the backtest period"""
@@ -542,6 +579,18 @@ class TLHBacktester:
         trading_dates = self.get_trading_dates(start_dt, end_dt)
         self.logger.info(f"Backtest period: {start_dt.date()} to {end_dt.date()}")
         self.logger.info(f"Trading days: {len(trading_dates)}")
+
+        # If BACK_TEST_DAYS is set, truncate trading window to that many days
+        if self.back_test_days is not None:
+            if self.back_test_days > len(trading_dates):
+                msg = (
+                    f"BACK_TEST_DAYS set to {self.back_test_days} but only {len(trading_dates)} trading days available."
+                    f" Max is {len(trading_dates)}."
+                )
+                self.logger.error(msg)
+                raise ValueError(msg)
+            trading_dates = trading_dates[:self.back_test_days]
+            self.logger.info(f"BACK_TEST_DAYS enabled: running on first {len(trading_dates)} trading days only")
         
         # Initialize portfolio
         self.initialize_portfolio(trading_dates[0], self.data_loader.selected_symbols[:self.params.NUM_STOCKS])
