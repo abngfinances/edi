@@ -1,0 +1,119 @@
+"""
+Tests for metadata_downloader.py
+
+Comprehensive test suite with mocked and integration tests.
+Tests follow TDD approach with incremental implementation.
+"""
+
+import json
+import logging
+import pytest
+from pathlib import Path
+from unittest.mock import Mock, patch, mock_open
+from backtesting.metadata_downloader import MetadataDownloader
+
+
+# ============================================================================
+# PYTEST CONFIGURATION
+# ============================================================================
+
+def pytest_addoption(parser):
+    """Add custom command line options"""
+    parser.addoption(
+        "--log-level",
+        action="store",
+        default="ERROR",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set logging level for tests (default: ERROR)"
+    )
+
+
+def pytest_configure(config):
+    """Configure pytest with custom options"""
+    log_level = config.getoption("--log-level")
+    logging.getLogger().setLevel(getattr(logging, log_level))
+
+
+# ============================================================================
+# PHASE 1, STEP 1.1: Constituents File Loading Tests
+# ============================================================================
+
+class TestLoadConstituents:
+    """Test constituents file loading and validation"""
+    
+    def test_load_constituents_file_not_found(self, tmp_path):
+        """Should raise ValueError with helpful message when file doesn't exist"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.load_constituents()
+        
+        assert 'not found' in str(exc_info.value).lower()
+        assert 'spy_constituents.json' in str(exc_info.value).lower()
+    
+    def test_load_constituents_invalid_format_no_symbols_key(self, tmp_path):
+        """Should raise ValueError when JSON missing 'symbols' key"""
+        # Create invalid constituents file (missing 'symbols' key)
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({'metadata': {'index_symbol': 'SPY'}}, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.load_constituents()
+        
+        assert 'symbols' in str(exc_info.value).lower()
+    
+    def test_load_constituents_invalid_format_symbols_not_array(self, tmp_path):
+        """Should raise ValueError when 'symbols' is not a list"""
+        # Create invalid constituents file ('symbols' is not a list)
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({'symbols': 'AAPL,MSFT'}, f)  # String instead of list
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.load_constituents()
+        
+        assert 'symbols' in str(exc_info.value).lower()
+        assert 'list' in str(exc_info.value).lower() or 'array' in str(exc_info.value).lower()
+    
+    def test_load_constituents_success(self, tmp_path):
+        """Should successfully load symbols from valid constituents file"""
+        # Create valid constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        expected_symbols = ['AAPL', 'MSFT', 'GOOGL']
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': expected_symbols,
+                'metadata': {
+                    'index_symbol': 'SPY',
+                    'download_timestamp': '2025-12-30T10:00:00Z',
+                    'total_holdings': 3
+                }
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        symbols = downloader.load_constituents()
+        
+        assert symbols == expected_symbols
+        assert isinstance(symbols, list)
