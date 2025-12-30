@@ -93,3 +93,38 @@ class MetadataDownloader:
         
         logger.info(f"Successfully loaded {len(symbols)} symbols")
         return symbols
+    
+    def load_metadata(self) -> Dict[str, Dict]:
+        """
+        Load existing metadata from JSON file or return empty dict if not found.
+        
+        Returns:
+            Dictionary mapping symbol -> metadata dict
+            
+        Raises:
+            ValueError: If file exists but has invalid format
+        """
+        logger.info(f"Loading metadata from {self.metadata_file}")
+        
+        # If file doesn't exist, return empty dict (will be created later)
+        if not self.metadata_file.exists():
+            logger.info("Metadata file not found, returning empty dict")
+            return {}
+        
+        # Load and parse JSON
+        try:
+            with open(self.metadata_file, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse metadata file: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg) from e
+        
+        # Validate format - must be a dictionary
+        if not isinstance(data, dict):
+            error_msg = "Metadata file must contain a dictionary/object"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        logger.info(f"Successfully loaded metadata for {len(data)} symbols")
+        return data

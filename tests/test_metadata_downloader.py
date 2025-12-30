@@ -117,3 +117,105 @@ class TestLoadConstituents:
         
         assert symbols == expected_symbols
         assert isinstance(symbols, list)
+
+
+# ============================================================================
+# PHASE 1, STEP 1.2: Metadata File Loading Tests
+# ============================================================================
+
+class TestLoadMetadata:
+    """Test metadata file loading and creation"""
+    
+    def test_load_metadata_file_not_found_creates_empty(self, tmp_path):
+        """Should return empty dict when metadata file doesn't exist"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Metadata file doesn't exist yet
+        assert not downloader.metadata_file.exists()
+        
+        metadata = downloader.load_metadata()
+        
+        assert metadata == {}
+        assert isinstance(metadata, dict)
+    
+    def test_load_metadata_invalid_json(self, tmp_path):
+        """Should raise ValueError when file contains invalid JSON"""
+        # Create invalid JSON file
+        metadata_file = tmp_path / 'spy_metadata.json'
+        with open(metadata_file, 'w') as f:
+            f.write('{ invalid json }')
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.load_metadata()
+        
+        assert 'parse' in str(exc_info.value).lower() or 'json' in str(exc_info.value).lower()
+    
+    def test_load_metadata_invalid_format_not_dict(self, tmp_path):
+        """Should raise ValueError when JSON is not a dictionary"""
+        # Create file with array instead of object
+        metadata_file = tmp_path / 'spy_metadata.json'
+        with open(metadata_file, 'w') as f:
+            json.dump(['AAPL', 'MSFT'], f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.load_metadata()
+        
+        assert 'dict' in str(exc_info.value).lower() or 'object' in str(exc_info.value).lower()
+    
+    def test_load_metadata_success(self, tmp_path):
+        """Should successfully load metadata from valid file"""
+        # Create valid metadata file
+        metadata_file = tmp_path / 'spy_metadata.json'
+        expected_metadata = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc.',
+                'sector': 'Technology',
+                'industry': 'Consumer Electronics',
+                'market_cap': 3000000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD',
+                'last_updated': '2025-12-30T10:00:00Z'
+            },
+            'MSFT': {
+                'symbol': 'MSFT',
+                'name': 'Microsoft Corporation',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'market_cap': 2800000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD',
+                'last_updated': '2025-12-30T10:00:00Z'
+            }
+        }
+        with open(metadata_file, 'w') as f:
+            json.dump(expected_metadata, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        metadata = downloader.load_metadata()
+        
+        assert metadata == expected_metadata
+        assert isinstance(metadata, dict)
+        assert 'AAPL' in metadata
+        assert 'MSFT' in metadata
