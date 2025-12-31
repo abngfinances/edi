@@ -311,3 +311,172 @@ class TestValidateMetadataEntry:
         }
         
         assert downloader._validate_metadata_entry(entry_with_extra) is False
+
+
+# ============================================================================
+# PHASE 2, STEP 2.1: Planning Updates (Diffing Logic) Tests
+# ============================================================================
+
+class TestPlanUpdates:
+    """Test planning updates between constituents and metadata"""
+    
+    def test_plan_updates_empty_metadata(self, tmp_path):
+        """Should add all constituents when metadata is empty"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Load constituents and empty metadata
+        constituents = downloader.load_constituents()
+        metadata = {}  # Empty metadata
+        
+        to_delete, to_add = downloader.plan_updates(constituents, metadata)
+        
+        assert to_delete == set()
+        assert to_add == {'A', 'B'}
+    
+    def test_plan_updates_no_changes_needed(self, tmp_path):
+        """Should have no changes when metadata matches constituents"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Load constituents
+        constituents = downloader.load_constituents()
+        
+        # Metadata matches constituents
+        metadata = {
+            'A': {'symbol': 'A', 'name': 'Company A', 'sector': 'Tech', 
+                  'industry': 'Software', 'market_cap': 1000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'},
+            'B': {'symbol': 'B', 'name': 'Company B', 'sector': 'Finance', 
+                  'industry': 'Banking', 'market_cap': 2000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'}
+        }
+        
+        to_delete, to_add = downloader.plan_updates(constituents, metadata)
+        
+        assert to_delete == set()
+        assert to_add == set()
+    
+    def test_plan_updates_add_new_symbols(self, tmp_path):
+        """Should add new symbols from constituents"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B', 'C'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Load constituents
+        constituents = downloader.load_constituents()
+        
+        # Metadata only has A and B
+        metadata = {
+            'A': {'symbol': 'A', 'name': 'Company A', 'sector': 'Tech', 
+                  'industry': 'Software', 'market_cap': 1000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'},
+            'B': {'symbol': 'B', 'name': 'Company B', 'sector': 'Finance', 
+                  'industry': 'Banking', 'market_cap': 2000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'}
+        }
+        
+        to_delete, to_add = downloader.plan_updates(constituents, metadata)
+        
+        assert to_delete == set()
+        assert to_add == {'C'}
+    
+    def test_plan_updates_delete_old_symbols(self, tmp_path):
+        """Should delete symbols not in constituents"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Load constituents
+        constituents = downloader.load_constituents()
+        
+        # Metadata has A and B, but B is no longer in constituents
+        metadata = {
+            'A': {'symbol': 'A', 'name': 'Company A', 'sector': 'Tech', 
+                  'industry': 'Software', 'market_cap': 1000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'},
+            'B': {'symbol': 'B', 'name': 'Company B', 'sector': 'Finance', 
+                  'industry': 'Banking', 'market_cap': 2000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'}
+        }
+        
+        to_delete, to_add = downloader.plan_updates(constituents, metadata)
+        
+        assert to_delete == {'B'}
+        assert to_add == set()
+    
+    def test_plan_updates_both_add_and_delete(self, tmp_path):
+        """Should both add and delete symbols"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'C'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Load constituents
+        constituents = downloader.load_constituents()
+        
+        # Metadata has A and B, constituents have A and C
+        metadata = {
+            'A': {'symbol': 'A', 'name': 'Company A', 'sector': 'Tech', 
+                  'industry': 'Software', 'market_cap': 1000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'},
+            'B': {'symbol': 'B', 'name': 'Company B', 'sector': 'Finance', 
+                  'industry': 'Banking', 'market_cap': 2000000, 
+                  'exchange': 'NYSE', 'currency': 'USD'}
+        }
+        
+        to_delete, to_add = downloader.plan_updates(constituents, metadata)
+        
+        assert to_delete == {'B'}
+        assert to_add == {'C'}
