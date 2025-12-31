@@ -246,6 +246,103 @@ The architecture follows these key principles:
 
 **Purpose**: Shared data models ensure compatibility across execution engines.
 
+#### 2.3.6 Data Management Tools
+
+**IndexDownloader** (`backtesting/index_downloader.py`)
+
+CLI tool for downloading S&P 500 constituent lists from yfinance.
+
+**Key Features:**
+- Downloads current S&P 500 holdings directly from SPY ETF
+- Extracts and validates constituent symbols
+- Saves to structured JSON format with metadata
+- Provides CLI interface with validation and error handling
+- Exit codes for shell script integration (0=success, 1=error)
+
+**Usage:**
+```bash
+# Download SPY constituents
+python backtesting/index_downloader.py SPY --output-dir backtest_data
+
+# With custom log level
+python backtesting/index_downloader.py SPY --output-dir backtest_data --log-level INFO
+```
+
+**Output Format** (`backtest_data/spy_constituents.json`):
+```json
+{
+  "symbols": ["AAPL", "MSFT", "GOOGL", ...],
+  "metadata": {
+    "index_symbol": "SPY",
+    "download_timestamp": "2025-12-30T10:00:00Z",
+    "total_holdings": 503
+  }
+}
+```
+
+**MetadataDownloader** (`backtesting/metadata_downloader.py`)
+
+CLI tool for downloading and maintaining stock metadata from yfinance.
+
+**Key Features:**
+- Downloads metadata for stocks: name, sector, industry, market_cap, exchange, currency
+- Incremental updates (adds new symbols, removes delisted)
+- Automatic timestamp management
+- Handles download failures with ignore_symbols mechanism
+- Rate limiting to respect API limits
+- Progress tracking with tqdm
+- Comprehensive validation and error reporting
+- Exit codes for shell script integration
+
+**Usage:**
+```bash
+# Initial download
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data
+
+# Update with failed symbol handling
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data --ignore-symbols BRK.B,BF.B
+
+# Custom rate limiting
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data --rate-limit-delay 1.0
+```
+
+**Command-Line Arguments:**
+- `index_symbol`: Index to process (e.g., SPY)
+- `--output-dir`: Output directory (default: backtest_data)
+- `--ignore-symbols`: Comma-separated list of symbols to ignore on download failure
+- `--log-level`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- `--rate-limit-delay`: Delay between downloads in seconds (default: 2.0)
+
+**Output Format** (`backtest_data/spy_metadata.json`):
+```json
+{
+  "AAPL": {
+    "symbol": "AAPL",
+    "name": "Apple Inc.",
+    "sector": "Technology",
+    "industry": "Consumer Electronics",
+    "market_cap": 3000000000000,
+    "exchange": "NASDAQ",
+    "currency": "USD",
+    "last_updated": "2025-12-30T10:00:00Z"
+  },
+  ...
+}
+```
+
+**Error Handling:**
+- Validates that `failed_symbols == ignore_symbols` (must match exactly)
+- Reports unexpected failures with specific symbol names
+- Reports unnecessary ignores with actionable fix commands
+- Non-zero exit code on validation failure for automation integration
+
+**Rationale**: 
+- **Separation of concerns**: Data download is separate from strategy execution
+- **Incremental updates**: Only downloads new/missing data, preserves existing metadata
+- **Robustness**: Handles API failures gracefully with ignore mechanism
+- **Maintainability**: Clear validation ensures data consistency
+- **Automation-ready**: Exit codes and detailed error messages support scripting
+
 ### 2.4 Data Flow
 
 #### 2.4.1 Backtest Flow
@@ -306,10 +403,17 @@ edi/
 ├── backtesting/
 │   ├── backtest_engine.py         # Backtest runner
 │   ├── backtest_execution_engine.py  # Backtest execution
-│   └── backtest_data_downloader.py   # Historical data download
+│   ├── backtest_data_downloader.py   # Historical data download
+│   ├── index_downloader.py        # S&P 500 constituent downloader
+│   └── metadata_downloader.py     # Stock metadata downloader
 │
 ├── data/                          # Runtime data (positions, transactions)
 ├── backtest_data/                 # Historical price data
+│   ├── prices/                    # Historical price data (parquet/csv)
+│   ├── metadata/                  # Stock metadata (JSON)
+│   │   ├── spy_constituents.json  # S&P 500 constituent list
+│   │   └── spy_metadata.json      # Stock metadata (sector, market cap, etc.)
+│   └── checkpoints/               # Download progress tracking
 └── backtest_results/              # Backtest output files
 ```
 
@@ -358,11 +462,30 @@ The system supports three execution modes:
 **Purpose**: Validate strategy performance on historical data before risking real money.
 
 **Setup:**
+
+**Step 1: Download S&P 500 Constituents**
 ```bash
-# Download historical data (first time only)
-cd backtesting
-python backtest_data_downloader.py
+python backtesting/index_downloader.py SPY --output-dir backtest_data
 ```
+
+**Step 2: Download Stock Metadata**
+```bash
+# Initial download (may fail for some symbols)
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data
+
+# If failures occur, re-run with ignore list (check error message for symbols)
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data --ignore-symbols BRK.B,BF.B
+```
+
+**Step 3: Download Historical Price Data**
+```bash
+python backtesting/backtest_data_downloader.py
+```
+
+**Files Created:**
+- `backtest_data/spy_constituents.json`: S&P 500 constituent list
+- `backtest_data/spy_metadata.json`: Stock metadata (sector, market cap, etc.)
+- `backtest_data/prices/all_prices.parquet`: Historical price data
 
 **Run Backtest:**
 ```bash
@@ -524,6 +647,20 @@ class BacktestParams:
    - Cause: Missing dependencies or incorrect paths
    - Solution: Ensure all dependencies installed, check Python path
 
+6. **Metadata Download Failures**
+   - Cause: Some symbols fail to download (e.g., BRK.B, BF.B with special characters)
+   - Solution: Re-run with `--ignore-symbols` flag containing failed symbols
+   - Example error message shows exact command to run
+
+7. **"Error: failed_symbols != ignore_symbols"**
+   - Cause: Actual download failures don't match provided ignore list
+   - Solution: Use exact ignore list from error message
+   - Shows both unexpected failures and unnecessary ignores
+
+8. **Constituents File Not Found**
+   - Cause: Index downloader not run or wrong output directory
+   - Solution: Run `python backtesting/index_downloader.py SPY --output-dir backtest_data`
+
 ### 3.9 Workflow Recommendations
 
 **Development Workflow:**
@@ -591,11 +728,30 @@ python strategy/di_tlh_sp500_sampling.py --help
 **Backtest Commands:**
 
 ```bash
-# Download historical data
+# Step 1: Download S&P 500 constituents
+python backtesting/index_downloader.py SPY --output-dir backtest_data
+
+# Step 2: Download stock metadata
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data [--ignore-symbols SYMBOL1,SYMBOL2]
+
+# Step 3: Download historical price data
 python backtesting/backtest_data_downloader.py
 
-# Run backtest
+# Step 4: Run backtest
 python backtesting/backtest_engine.py
+```
+
+**Data Update Commands:**
+
+```bash
+# Update constituents (run monthly or when index changes)
+python backtesting/index_downloader.py SPY --output-dir backtest_data
+
+# Update metadata (adds new symbols, removes delisted)
+python backtesting/metadata_downloader.py SPY --output-dir backtest_data
+
+# Update historical prices
+python backtesting/backtest_data_downloader.py
 ```
 
 ---
@@ -624,6 +780,14 @@ Largest peak-to-trough decline in portfolio value. Expressed as negative percent
 ---
 
 ## Version History
+
+- **v1.1**: Data management improvements
+  - Added `index_downloader.py` for S&P 500 constituent downloads
+  - Added `metadata_downloader.py` for stock metadata management
+  - Incremental metadata updates with validation
+  - Comprehensive error handling and CLI interfaces
+  - Exit code support for automation
+  - Test-driven development with 43 tests (42 unit + 1 integration)
 
 - **v1.0**: Initial unified architecture implementation
   - Core strategy extraction
