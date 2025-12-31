@@ -730,3 +730,305 @@ class TestDownloadMetadataBatch:
         assert call_args[0][0] == symbols_to_add  # First positional argument
         assert 'desc' in call_args[1]  # Keyword argument
         assert 'Downloading metadata' in call_args[1]['desc']
+
+
+# ============================================================================
+# PHASE 4, STEP 4.1: Metadata Persistence Tests
+# ============================================================================
+
+class TestSaveMetadata:
+    """Test metadata persistence to file"""
+    
+    def test_save_metadata_creates_new_file(self, tmp_path):
+        """Should create new metadata file with correct content"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Metadata file doesn't exist yet
+        assert not downloader.metadata_file.exists()
+        
+        # Create metadata to save
+        metadata = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc.',
+                'sector': 'Technology',
+                'industry': 'Consumer Electronics',
+                'market_cap': 3000000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            }
+        }
+        
+        # Save metadata
+        downloader.save_metadata(metadata)
+        
+        # Verify file was created
+        assert downloader.metadata_file.exists()
+        
+        # Verify content
+        with open(downloader.metadata_file, 'r') as f:
+            saved_data = json.load(f)
+        
+        assert 'AAPL' in saved_data
+        
+        # Verify all required fields are present
+        aapl_data = saved_data['AAPL']
+        assert aapl_data['symbol'] == 'AAPL'
+        assert aapl_data['name'] == 'Apple Inc.'
+        assert aapl_data['sector'] == 'Technology'
+        assert aapl_data['industry'] == 'Consumer Electronics'
+        assert aapl_data['market_cap'] == 3000000000000
+        assert aapl_data['exchange'] == 'NASDAQ'
+        assert aapl_data['currency'] == 'USD'
+        
+        # Verify timestamp was added
+        assert 'last_updated' in aapl_data
+    
+    def test_save_metadata_updates_existing(self, tmp_path):
+        """Should correctly update existing metadata file (add/delete)"""
+        # Create existing metadata file
+        metadata_file = tmp_path / 'spy_metadata.json'
+        existing_metadata = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc.',
+                'sector': 'Technology',
+                'industry': 'Consumer Electronics',
+                'market_cap': 3000000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD',
+                'last_updated': '2025-12-29T10:00:00Z'
+            },
+            'OLD': {
+                'symbol': 'OLD',
+                'name': 'Old Company',
+                'sector': 'Finance',
+                'industry': 'Banking',
+                'market_cap': 1000000000,
+                'exchange': 'NYSE',
+                'currency': 'USD',
+                'last_updated': '2025-12-29T10:00:00Z'
+            }
+        }
+        with open(metadata_file, 'w') as f:
+            json.dump(existing_metadata, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # New metadata: keep AAPL, remove OLD, add MSFT
+        new_metadata = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc.',
+                'sector': 'Technology',
+                'industry': 'Consumer Electronics',
+                'market_cap': 3000000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            },
+            'MSFT': {
+                'symbol': 'MSFT',
+                'name': 'Microsoft Corporation',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'market_cap': 2800000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            }
+        }
+        
+        # Save updated metadata
+        downloader.save_metadata(new_metadata)
+        
+        # Verify content
+        with open(downloader.metadata_file, 'r') as f:
+            saved_data = json.load(f)
+        
+        assert 'AAPL' in saved_data
+        assert 'MSFT' in saved_data
+        assert 'OLD' not in saved_data  # Should be removed
+        assert len(saved_data) == 2
+    
+    def test_save_metadata_includes_timestamps(self, tmp_path):
+        """Should add last_updated timestamp to each entry"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Create metadata without timestamps
+        metadata = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc.',
+                'sector': 'Technology',
+                'industry': 'Consumer Electronics',
+                'market_cap': 3000000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            },
+            'MSFT': {
+                'symbol': 'MSFT',
+                'name': 'Microsoft Corporation',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'market_cap': 2800000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            }
+        }
+        
+        # Save metadata
+        downloader.save_metadata(metadata)
+        
+        # Verify timestamps were added
+        with open(downloader.metadata_file, 'r') as f:
+            saved_data = json.load(f)
+        
+        assert 'last_updated' in saved_data['AAPL']
+        assert 'last_updated' in saved_data['MSFT']
+        
+        # Verify timestamp format (ISO 8601 with Z)
+        timestamp = saved_data['AAPL']['last_updated']
+        assert timestamp.endswith('Z')
+        assert 'T' in timestamp
+        
+        # Verify it's a valid ISO 8601 timestamp
+        from datetime import datetime
+        datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+
+
+# ============================================================================
+# PHASE 4, STEP 4.2: Ignore Symbols Validation Tests
+# ============================================================================
+
+class TestValidateIgnoreSymbols:
+    """Test ignore symbols validation logic"""
+    
+    def test_validate_ignore_symbols_exact_match(self, tmp_path):
+        """Should not raise error when failed_symbols exactly match ignore_symbols"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols={'A', 'B'},
+            output_dir=str(tmp_path)
+        )
+        
+        failed_symbols = {'A', 'B'}
+        
+        # Should not raise any exception
+        downloader.validate_ignore_symbols(failed_symbols)
+    
+    def test_validate_ignore_symbols_empty_sets(self, tmp_path):
+        """Should not raise error when both sets are empty"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        failed_symbols = set()
+        
+        # Should not raise any exception
+        downloader.validate_ignore_symbols(failed_symbols)
+    
+    def test_validate_ignore_symbols_unexpected_failures(self, tmp_path):
+        """Should raise ValueError when there are unexpected failures"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols={'A'},
+            output_dir=str(tmp_path)
+        )
+        
+        failed_symbols = {'A', 'B', 'C'}
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.validate_ignore_symbols(failed_symbols)
+        
+        error_msg = str(exc_info.value)
+        
+        # Verify error message format
+        assert 'Error: failed_symbols != ignore_symbols' in error_msg
+        
+        # Verify ignore_symbols provided is shown
+        assert "ignore_symbols provided: {'A'}" in error_msg
+        
+        # Verify unexpected failures section with complete set (order may vary)
+        assert 'Unexpected failures in metadata download (failed symbols that were NOT in ignore_symbols):' in error_msg
+        assert ("{'B', 'C'}" in error_msg or "{'C', 'B'}" in error_msg)
+        
+        # Verify fix command includes both A, B, C
+        assert '--ignore-symbols' in error_msg
+        # Fix command should have A,B,C in some order
+        assert ('A,B,C' in error_msg or 'A,C,B' in error_msg or 'B,A,C' in error_msg or 
+                'B,C,A' in error_msg or 'C,A,B' in error_msg or 'C,B,A' in error_msg)
+    
+    def test_validate_ignore_symbols_unnecessary_ignores(self, tmp_path):
+        """Should raise ValueError when there are unnecessary ignore_symbols"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols={'A', 'B'},
+            output_dir=str(tmp_path)
+        )
+        
+        failed_symbols = {'A'}
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.validate_ignore_symbols(failed_symbols)
+        
+        error_msg = str(exc_info.value)
+        
+        # Verify error message format
+        assert 'Error: failed_symbols != ignore_symbols' in error_msg
+        
+        # Verify the complete ignore_symbols set is shown (order may vary)
+        assert "ignore_symbols provided: {'A', 'B'}" in error_msg or "ignore_symbols provided: {'B', 'A'}" in error_msg
+        
+        # Verify unnecessary ignores section shows B as a set
+        assert 'Ignore symbols that did NOT fail (unnecessary):' in error_msg
+        assert "{'B'}" in error_msg
+        
+        # Verify fix command shows only A (the symbol that actually failed)
+        assert 'To fix: --ignore-symbols A' in error_msg
+    
+    def test_validate_ignore_symbols_both_deltas(self, tmp_path):
+        """Should show both unexpected failures and unnecessary ignores"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols={'A', 'B'},
+            output_dir=str(tmp_path)
+        )
+        
+        failed_symbols = {'A', 'C'}
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.validate_ignore_symbols(failed_symbols)
+        
+        error_msg = str(exc_info.value)
+        
+        # Verify error message format
+        assert 'Error: failed_symbols != ignore_symbols' in error_msg
+        
+        # Verify ignore_symbols provided is shown (order may vary)
+        assert "ignore_symbols provided: {'A', 'B'}" in error_msg or "ignore_symbols provided: {'B', 'A'}" in error_msg
+        
+        # Should show unexpected failures (C) as a set
+        assert 'Unexpected failures in metadata download (failed symbols that were NOT in ignore_symbols):' in error_msg
+        assert "{'C'}" in error_msg
+        
+        # Should show unnecessary ignores (B) as a set
+        assert 'Ignore symbols that did NOT fail (unnecessary):' in error_msg
+        assert "{'B'}" in error_msg
+        
+        # Should show the fix command with both A and C (order may vary)
+        assert '--ignore-symbols' in error_msg
+        # Fix command should contain both A and C
+        assert ('A,C' in error_msg or 'C,A' in error_msg)

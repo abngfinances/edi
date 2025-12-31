@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import yfinance as yf
+from datetime import datetime
 from typing import List, Dict, Set, Tuple
 from pathlib import Path
 from tqdm import tqdm
@@ -284,3 +285,79 @@ class MetadataDownloader:
         
         logger.info(f"Downloaded {len(new_metadata)} symbols, {len(failed_symbols)} failed")
         return failed_symbols, new_metadata
+    
+    def save_metadata(self, metadata: Dict[str, Dict]) -> None:
+        """
+        Save metadata to JSON file with timestamps.
+        
+        Args:
+            metadata: Dictionary mapping symbol -> metadata dict
+        """
+        logger.info(f"Saving metadata for {len(metadata)} symbols to {self.metadata_file}")
+        
+        # Add last_updated timestamp to each entry
+        timestamped_metadata = {}
+        current_time = datetime.utcnow().isoformat() + 'Z'
+        
+        for symbol, entry in metadata.items():
+            timestamped_entry = entry.copy()
+            timestamped_entry['last_updated'] = current_time
+            timestamped_metadata[symbol] = timestamped_entry
+        
+        # Ensure output directory exists
+        self.metadata_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save to file
+        with open(self.metadata_file, 'w') as f:
+            json.dump(timestamped_metadata, f, indent=2)
+        
+        logger.info(f"Successfully saved metadata to {self.metadata_file}")
+    
+    def validate_ignore_symbols(self, failed_symbols: Set[str]) -> None:
+        """
+        Validate that failed symbols match ignore_symbols exactly.
+        
+        Raises ValueError if there's a mismatch, with detailed error message
+        showing which symbols to add/remove from ignore_symbols.
+        
+        Args:
+            failed_symbols: Set of symbols that failed to download
+            
+        Raises:
+            ValueError: If failed_symbols != ignore_symbols
+        """
+        if failed_symbols == self.ignore_symbols:
+            logger.info("Failed symbols match ignore_symbols exactly")
+            return
+        
+        # Calculate deltas
+        unexpected_failures = failed_symbols - self.ignore_symbols
+        unnecessary_ignores = self.ignore_symbols - failed_symbols
+        
+        # Build detailed error message
+        error_lines = [
+            "Error: failed_symbols != ignore_symbols",
+            f"ignore_symbols provided: {self.ignore_symbols}",
+        ]
+        
+        if unexpected_failures:
+            error_lines.append(
+                f"Unexpected failures in metadata download (failed symbols that were NOT in ignore_symbols): {unexpected_failures}"
+            )
+        
+        if unnecessary_ignores:
+            error_lines.append(
+                f"Ignore symbols that did NOT fail (unnecessary): {unnecessary_ignores}"
+            )
+        
+        # Generate fix command
+        correct_ignore_symbols = failed_symbols
+        if correct_ignore_symbols:
+            symbols_str = ','.join(sorted(correct_ignore_symbols))
+            error_lines.append(f"To fix: --ignore-symbols {symbols_str}")
+        else:
+            error_lines.append("To fix: remove --ignore-symbols argument (no failures expected)")
+        
+        error_msg = '\n'.join(error_lines)
+        logger.error(error_msg)
+        raise ValueError(error_msg)
