@@ -480,3 +480,253 @@ class TestPlanUpdates:
         
         assert to_delete == {'B'}
         assert to_add == {'C'}
+
+
+# ============================================================================
+# PHASE 3, STEP 3.1: Single Symbol Download Tests
+# ============================================================================
+
+class TestDownloadSymbolMetadata:
+    """Test downloading metadata for a single symbol"""
+    
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_symbol_metadata_success(self, mock_ticker, tmp_path):
+        """Should successfully download and format metadata for a symbol"""
+        # Mock yfinance Ticker response
+        mock_info = {
+            'symbol': 'AAPL',
+            'shortName': 'Apple Inc.',
+            'sector': 'Technology',
+            'industry': 'Consumer Electronics',
+            'marketCap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD'
+        }
+        mock_ticker_instance = Mock()
+        mock_ticker_instance.info = mock_info
+        mock_ticker.return_value = mock_ticker_instance
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        metadata = downloader.download_symbol_metadata('AAPL')
+        
+        # Verify correct fields returned
+        assert metadata['symbol'] == 'AAPL'
+        assert metadata['name'] == 'Apple Inc.'
+        assert metadata['sector'] == 'Technology'
+        assert metadata['industry'] == 'Consumer Electronics'
+        assert metadata['market_cap'] == 3000000000000
+        assert metadata['exchange'] == 'NASDAQ'
+        assert metadata['currency'] == 'USD'
+        
+        # Verify yfinance was called correctly
+        mock_ticker.assert_called_once_with('AAPL')
+    
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_symbol_metadata_missing_field(self, mock_ticker, tmp_path):
+        """Should raise ValueError when required field is missing"""
+        # Mock yfinance with incomplete data (missing 'sector')
+        mock_info = {
+            'symbol': 'AAPL',
+            'shortName': 'Apple Inc.',
+            'industry': 'Consumer Electronics',
+            'marketCap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD'
+        }
+        mock_ticker_instance = Mock()
+        mock_ticker_instance.info = mock_info
+        mock_ticker.return_value = mock_ticker_instance
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.download_symbol_metadata('AAPL')
+        
+        assert 'missing required field' in str(exc_info.value).lower()
+        assert 'sector' in str(exc_info.value).lower()
+    
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_symbol_metadata_yfinance_exception(self, mock_ticker, tmp_path):
+        """Should raise ValueError when yfinance raises exception"""
+        # Mock yfinance to raise exception
+        mock_ticker.side_effect = Exception("Network error")
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            downloader.download_symbol_metadata('AAPL')
+        
+        assert 'failed' in str(exc_info.value).lower()
+        assert 'aapl' in str(exc_info.value).lower()
+
+
+# ============================================================================
+# PHASE 3, STEP 3.2: Batch Download with Progress Tests
+# ============================================================================
+
+class TestDownloadMetadataBatch:
+    """Test batch downloading metadata with progress tracking"""
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_metadata_all_success(self, mock_ticker, mock_sleep, tmp_path):
+        """Should download all symbols successfully"""
+        # Mock yfinance for 3 symbols
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        symbols_to_add = ['A', 'B', 'C']
+        failed_symbols, new_metadata = downloader.download_metadata_batch(symbols_to_add, rate_limit_delay=0.5)
+        
+        assert failed_symbols == set()
+        assert len(new_metadata) == 3
+        assert 'A' in new_metadata
+        assert 'B' in new_metadata
+        assert 'C' in new_metadata
+        
+        # Verify rate limiting was called (2 times for 3 symbols: after 1st and 2nd)
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_called_with(0.5)
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_metadata_some_failures(self, mock_ticker, mock_sleep, tmp_path):
+        """Should track failed symbols and continue with others"""
+        # Mock yfinance - symbol 'B' will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol == 'B':
+                raise Exception("Download failed for B")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        symbols_to_add = ['A', 'B', 'C']
+        failed_symbols, new_metadata = downloader.download_metadata_batch(symbols_to_add, rate_limit_delay=0.5)
+        
+        assert failed_symbols == {'B'}
+        assert len(new_metadata) == 2
+        assert 'A' in new_metadata
+        assert 'C' in new_metadata
+        assert 'B' not in new_metadata
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_metadata_respects_rate_limit(self, mock_ticker, mock_sleep, tmp_path):
+        """Should enforce rate limiting between downloads"""
+        # Mock yfinance
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        symbols_to_add = ['A', 'B', 'C', 'D']
+        failed_symbols, new_metadata = downloader.download_metadata_batch(symbols_to_add, rate_limit_delay=1.5)
+        
+        # Should sleep 3 times for 4 symbols (after 1st, 2nd, 3rd)
+        assert mock_sleep.call_count == 3
+        mock_sleep.assert_called_with(1.5)
+    
+    @patch('backtesting.metadata_downloader.tqdm')
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_download_metadata_shows_progress(self, mock_ticker, mock_sleep, mock_tqdm, tmp_path):
+        """Should display progress bar with correct total"""
+        # Mock yfinance
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Mock tqdm to track calls
+        mock_progress = Mock()
+        mock_tqdm.return_value = mock_progress
+        mock_progress.__iter__ = Mock(return_value=iter(['A', 'B', 'C']))
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        symbols_to_add = ['A', 'B', 'C']
+        failed_symbols, new_metadata = downloader.download_metadata_batch(symbols_to_add, rate_limit_delay=0.5)
+        
+        # Verify tqdm was called with correct parameters
+        mock_tqdm.assert_called_once()
+        call_args = mock_tqdm.call_args
+        assert call_args[0][0] == symbols_to_add  # First positional argument
+        assert 'desc' in call_args[1]  # Keyword argument
+        assert 'Downloading metadata' in call_args[1]['desc']

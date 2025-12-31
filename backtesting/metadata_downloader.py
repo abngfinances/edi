@@ -7,8 +7,11 @@ Incrementally updates metadata for index constituents.
 
 import json
 import logging
-from typing import List, Dict, Set
+import time
+import yfinance as yf
+from typing import List, Dict, Set, Tuple
 from pathlib import Path
+from tqdm import tqdm
 
 # Logger will be configured in main() or by caller
 logger = logging.getLogger(__name__)
@@ -194,3 +197,90 @@ class MetadataDownloader:
             logger.debug(f"To add: {sorted(to_add)}")
         
         return to_delete, to_add
+    
+    def download_symbol_metadata(self, symbol: str) -> Dict:
+        """
+        Download metadata for a single symbol from yfinance.
+        
+        Args:
+            symbol: Stock symbol to download
+            
+        Returns:
+            Dictionary with metadata fields
+            
+        Raises:
+            ValueError: If download fails or required fields are missing
+        """
+        logger.debug(f"Downloading metadata for {symbol}")
+        
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+        except Exception as e:
+            error_msg = f"Failed to download metadata for {symbol}: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg) from e
+        
+        # Extract required fields
+        required_mapping = {
+            'symbol': 'symbol',
+            'name': 'shortName',
+            'sector': 'sector',
+            'industry': 'industry',
+            'market_cap': 'marketCap',
+            'exchange': 'exchange',
+            'currency': 'currency'
+        }
+        
+        metadata = {}
+        missing_fields = []
+        
+        for our_field, yf_field in required_mapping.items():
+            value = info.get(yf_field)
+            if value is None:
+                missing_fields.append(yf_field)
+            else:
+                metadata[our_field] = value
+        
+        # Check if any required fields are missing
+        if missing_fields:
+            error_msg = f"Symbol {symbol} missing required fields: {', '.join(missing_fields)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        logger.debug(f"Successfully downloaded metadata for {symbol}")
+        return metadata
+    
+    def download_metadata_batch(self, symbols_to_add: List[str], rate_limit_delay: float = 1.0) -> Tuple[Set[str], Dict[str, Dict]]:
+        """
+        Download metadata for multiple symbols with progress tracking and rate limiting.
+        
+        Args:
+            symbols_to_add: List of symbols to download
+            rate_limit_delay: Delay in seconds between downloads (default: 1.0)
+            
+        Returns:
+            Tuple of (failed_symbols, new_metadata)
+            - failed_symbols: Set of symbols that failed to download
+            - new_metadata: Dict mapping symbol -> metadata dict for successful downloads
+        """
+        logger.info(f"Downloading metadata for {len(symbols_to_add)} symbols...")
+        
+        failed_symbols = set()
+        new_metadata = {}
+        
+        # Download with progress bar
+        for i, symbol in enumerate(tqdm(symbols_to_add, desc="Downloading metadata")):
+            try:
+                metadata = self.download_symbol_metadata(symbol)
+                new_metadata[symbol] = metadata
+            except ValueError as e:
+                logger.warning(f"Failed to download {symbol}: {e}")
+                failed_symbols.add(symbol)
+            
+            # Rate limiting (don't sleep after last symbol)
+            if i < len(symbols_to_add) - 1:
+                time.sleep(rate_limit_delay)
+        
+        logger.info(f"Downloaded {len(new_metadata)} symbols, {len(failed_symbols)} failed")
+        return failed_symbols, new_metadata
