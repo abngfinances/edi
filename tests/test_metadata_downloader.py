@@ -1335,3 +1335,243 @@ class TestUpdateMetadata:
         error_msg = str(exc_info.value)
         assert 'failed_symbols != ignore_symbols' in error_msg.lower()
         assert "{'B'}" in error_msg
+
+
+# ============================================================================
+# PHASE 5, STEP 5.2: CLI Tests
+# ============================================================================
+
+class TestMain:
+    """Test CLI main function"""
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    @patch('sys.argv', ['metadata_downloader.py', 'SPY', '--output-dir', '/tmp/test'])
+    def test_main_success(self, mock_ticker, mock_sleep, tmp_path, capsys):
+        """Should successfully run main with minimal arguments"""
+        # Create constituents file
+        output_dir = tmp_path / 'test_output'
+        output_dir.mkdir()
+        constituents_file = output_dir / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Patch sys.argv with correct output directory
+        with patch('sys.argv', ['metadata_downloader.py', 'SPY', '--output-dir', str(output_dir)]):
+            from backtesting.metadata_downloader import main
+            exit_code = main()
+        
+        # Verify success
+        assert exit_code == 0
+        
+        # Verify output contains summary
+        captured = capsys.readouterr()
+        assert 'Metadata Update Summary' in captured.out
+        assert 'Index Symbol:' in captured.out
+        assert 'SPY' in captured.out
+        assert '✓' in captured.out
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_main_with_ignore_symbols(self, mock_ticker, mock_sleep, tmp_path, capsys, caplog):
+        """Should parse ignore-symbols argument correctly"""
+        # Create constituents file
+        output_dir = tmp_path / 'test_output'
+        output_dir.mkdir()
+        constituents_file = output_dir / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B', 'C'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance - B will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol == 'B':
+                raise Exception("Download failed")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Run with ignore-symbols
+        with patch('sys.argv', ['metadata_downloader.py', 'SPY', 
+                               '--output-dir', str(output_dir),
+                               '--ignore-symbols', 'B']):
+            from backtesting.metadata_downloader import main
+            exit_code = main()
+        
+        # Should succeed because B is ignored
+        assert exit_code == 0
+        
+        captured = capsys.readouterr()
+        assert 'Failed Downloads:       1' in captured.out
+        # Verify the specific failed symbol is mentioned in logs
+        assert 'B' in caplog.text
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_main_validation_error(self, mock_ticker, mock_sleep, tmp_path, capsys):
+        """Should return error code 1 on validation failure"""
+        # Create constituents file
+        output_dir = tmp_path / 'test_output'
+        output_dir.mkdir()
+        constituents_file = output_dir / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance - B will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol == 'B':
+                raise Exception("Download failed")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Run without ignoring B - should fail validation
+        with patch('sys.argv', ['metadata_downloader.py', 'SPY', 
+                               '--output-dir', str(output_dir)]):
+            from backtesting.metadata_downloader import main
+            exit_code = main()
+        
+        # Should fail with exit code 1
+        assert exit_code == 1
+        
+        # Verify error message includes the specific failed symbol
+        captured = capsys.readouterr()
+        assert '❌' in captured.err
+        # Should mention the specific symbol that failed
+        assert 'B' in captured.err or 'B' in captured.out
+        # Should show it was an unexpected failure
+        assert 'unexpected' in captured.err.lower() or 'unexpected' in captured.out.lower()
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_main_multiple_ignore_symbols(self, mock_ticker, mock_sleep, tmp_path, capsys, caplog):
+        """Should parse comma-separated ignore-symbols correctly"""
+        # Create constituents file
+        output_dir = tmp_path / 'test_output'
+        output_dir.mkdir()
+        constituents_file = output_dir / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B', 'C', 'D'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance - B and D will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol in ('B', 'D'):
+                raise Exception("Download failed")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Run with multiple ignore-symbols
+        with patch('sys.argv', ['metadata_downloader.py', 'SPY', 
+                               '--output-dir', str(output_dir),
+                               '--ignore-symbols', 'B,D']):
+            from backtesting.metadata_downloader import main
+            exit_code = main()
+        
+        # Should succeed
+        assert exit_code == 0
+        
+        captured = capsys.readouterr()
+        assert 'Failed Downloads:       2' in captured.out
+        # Verify both failed symbols are mentioned in logs
+        assert 'B' in caplog.text
+        assert 'D' in caplog.text
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_main_custom_rate_limit(self, mock_ticker, mock_sleep, tmp_path, capsys):
+        """Should use custom rate-limit-delay argument"""
+        # Create constituents file
+        output_dir = tmp_path / 'test_output'
+        output_dir.mkdir()
+        constituents_file = output_dir / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        # Run with custom rate limit
+        with patch('sys.argv', ['metadata_downloader.py', 'SPY', 
+                               '--output-dir', str(output_dir),
+                               '--rate-limit-delay', '0.5']):
+            from backtesting.metadata_downloader import main
+            exit_code = main()
+        
+        assert exit_code == 0
+        
+        # Verify rate limit was used (1 sleep for 2 symbols)
+        mock_sleep.assert_called_with(0.5)

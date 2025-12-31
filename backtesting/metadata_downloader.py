@@ -5,8 +5,10 @@ Downloads and maintains stock metadata from yfinance.
 Incrementally updates metadata for index constituents.
 """
 
+import argparse
 import json
 import logging
+import sys
 import time
 import yfinance as yf
 from datetime import datetime
@@ -455,3 +457,123 @@ class MetadataDownloader:
         
         logger.info(f"Metadata update complete: {stats}")
         return stats
+
+
+def main():
+    """
+    Main CLI entry point for metadata downloader.
+    
+    Parses command-line arguments and runs the metadata update process.
+    """
+    parser = argparse.ArgumentParser(
+        description='Download and maintain stock metadata for index constituents',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Download SPY metadata to current directory
+  python metadata_downloader.py SPY
+  
+  # Download with specific output directory
+  python metadata_downloader.py SPY --output-dir backtest_data/metadata
+  
+  # Ignore known failing symbols
+  python metadata_downloader.py SPY --ignore-symbols BRK.B,BF.B
+  
+  # Enable debug logging
+  python metadata_downloader.py SPY --log-level DEBUG
+        """
+    )
+    
+    # Positional arguments
+    parser.add_argument(
+        'index_symbol',
+        type=str,
+        help='Index symbol (e.g., SPY, QQQ)'
+    )
+    
+    # Optional arguments
+    parser.add_argument(
+        '--ignore-symbols',
+        type=str,
+        default='',
+        help='Comma-separated list of symbols to ignore failures for (e.g., BRK.B,BF.B)'
+    )
+    
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='.',
+        help='Directory containing input/output files (default: current directory)'
+    )
+    
+    parser.add_argument(
+        '--log-level',
+        type=str,
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        default='INFO',
+        help='Logging level (default: INFO)'
+    )
+    
+    parser.add_argument(
+        '--rate-limit-delay',
+        type=float,
+        default=1.0,
+        help='Delay in seconds between yfinance requests (default: 1.0)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Parse ignore_symbols
+    ignore_symbols = set()
+    if args.ignore_symbols:
+        ignore_symbols = set(s.strip() for s in args.ignore_symbols.split(',') if s.strip())
+        logger.info(f"Ignoring failures for symbols: {sorted(ignore_symbols)}")
+    
+    try:
+        # Create downloader
+        downloader = MetadataDownloader(
+            index_symbol=args.index_symbol,
+            ignore_symbols=ignore_symbols,
+            output_dir=args.output_dir
+        )
+        
+        # Run update
+        logger.info(f"Starting metadata update for {args.index_symbol}")
+        stats = downloader.update_metadata(rate_limit_delay=args.rate_limit_delay)
+        
+        # Print summary
+        print("\n" + "="*60)
+        print("Metadata Update Summary")
+        print("="*60)
+        print(f"Index Symbol:           {args.index_symbol}")
+        print(f"Constituents:           {stats['constituents_count']}")
+        print(f"Symbols to Delete:      {stats['to_delete_count']}")
+        print(f"Symbols to Add:         {stats['to_add_count']}")
+        print(f"Failed Downloads:       {stats['failed_count']}")
+        print(f"Final Metadata Count:   {stats['metadata_count']}")
+        print("="*60)
+        print(f"✓ Metadata saved to {downloader.metadata_file}")
+        print("="*60 + "\n")
+        
+        return 0
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        print(f"\n❌ Error: {e}\n", file=sys.stderr)
+        return 1
+    
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        print(f"\n❌ Unexpected error: {e}\n", file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
