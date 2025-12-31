@@ -1575,3 +1575,104 @@ class TestMain:
         
         # Verify rate limit was used (1 sleep for 2 symbols)
         mock_sleep.assert_called_with(0.5)
+
+
+# ============================================================================
+# PHASE 6: Integration Test with Real yfinance Calls
+# ============================================================================
+
+class TestIntegration:
+    """Integration tests that call real yfinance API (slow, requires network)"""
+    
+    @pytest.mark.integration
+    def test_download_real_metadata(self, tmp_path):
+        """
+        Integration test: Download real metadata from yfinance
+        
+        This test makes actual API calls to yfinance and verifies the complete
+        end-to-end workflow. Run with: pytest -m integration
+        
+        Skip by default with: pytest -m "not integration"
+        """
+        # Create constituents file with 5 real symbols
+        constituents_file = tmp_path / 'spy_constituents.json'
+        test_symbols = ['AAPL', 'MSFT', 'GOOGL', 'IBM', 'TSLA']
+        
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': test_symbols,
+                'metadata': {
+                    'index_symbol': 'SPY',
+                    'download_timestamp': '2025-12-30T10:00:00Z',
+                    'total_holdings': 5
+                }
+            }, f)
+        
+        # Create downloader and run update
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Run update with real yfinance calls (rate limit to be nice to API)
+        stats = downloader.update_metadata(rate_limit_delay=0.5)
+        
+        # Verify statistics
+        assert stats['constituents_count'] == 5
+        assert stats['to_delete_count'] == 0
+        assert stats['to_add_count'] == 5
+        assert stats['failed_count'] == 0  # All symbols should succeed
+        assert stats['metadata_count'] == 5
+        
+        # Verify metadata file was created
+        metadata_file = tmp_path / 'spy_metadata.json'
+        assert metadata_file.exists()
+        
+        # Load and verify metadata
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        
+        assert len(metadata) == 5
+        
+        # Verify each symbol has all required fields
+        for symbol in test_symbols:
+            assert symbol in metadata, f"Symbol {symbol} missing from metadata"
+            
+            entry = metadata[symbol]
+            
+            # Verify all required fields exist
+            assert entry['symbol'] == symbol
+            assert 'name' in entry
+            assert 'sector' in entry
+            assert 'industry' in entry
+            assert 'market_cap' in entry
+            assert 'exchange' in entry
+            assert 'currency' in entry
+            assert 'last_updated' in entry
+            
+            # Verify field types
+            assert isinstance(entry['name'], str)
+            assert isinstance(entry['sector'], str)
+            assert isinstance(entry['industry'], str)
+            assert isinstance(entry['market_cap'], (int, float))
+            assert isinstance(entry['exchange'], str)
+            assert isinstance(entry['currency'], str)
+            assert isinstance(entry['last_updated'], str)
+            
+            # Verify non-empty strings
+            assert len(entry['name']) > 0
+            assert len(entry['sector']) > 0
+            assert len(entry['industry']) > 0
+            assert entry['market_cap'] > 0
+            assert len(entry['exchange']) > 0
+            assert entry['currency'] in ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF']
+            
+            # Verify timestamp format
+            assert 'T' in entry['last_updated']
+            assert entry['last_updated'].endswith('Z')
+        
+        # Verify metadata validation passes
+        for symbol, entry in metadata.items():
+            assert downloader._validate_metadata_entry(entry), \
+                f"Validation failed for {symbol}: {entry}"
