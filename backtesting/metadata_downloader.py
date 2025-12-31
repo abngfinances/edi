@@ -128,3 +128,37 @@ class MetadataDownloader:
         
         logger.info(f"Successfully loaded metadata for {len(data)} symbols")
         return data
+    
+    def _validate_metadata_entry(self, entry: Dict) -> bool:
+        """
+        Validate that a metadata entry has all required fields and no unexpected fields.
+        
+        Args:
+            entry: Metadata dictionary for a single symbol
+            
+        Returns:
+            True if all required fields present, non-null, and no unexpected fields
+        """
+        required_fields = {
+            'symbol',
+            'name',
+            'sector',
+            'industry',
+            'market_cap',
+            'exchange',
+            'currency'
+        }
+        
+        entry_fields = set(entry.keys())
+        
+        # Check all required fields are present and non-null
+        for field in required_fields:
+            if field not in entry or entry[field] is None:
+                return False
+        
+        # Check no unexpected fields (allow 'last_updated' as it's added during persistence)
+        allowed_fields = required_fields | {'last_updated'}
+        if not entry_fields.issubset(allowed_fields):
+            return False
+        
+        return True

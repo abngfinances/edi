@@ -219,3 +219,95 @@ class TestLoadMetadata:
         assert isinstance(metadata, dict)
         assert 'AAPL' in metadata
         assert 'MSFT' in metadata
+
+
+# ============================================================================
+# PHASE 1, STEP 1.3: Metadata Entry Validation Tests
+# ============================================================================
+
+class TestValidateMetadataEntry:
+    """Test metadata entry validation"""
+    
+    def test_validate_metadata_entry_all_fields_present(self, tmp_path):
+        """Should return True when all required fields exist"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        valid_entry = {
+            'symbol': 'AAPL',
+            'name': 'Apple Inc.',
+            'sector': 'Technology',
+            'industry': 'Consumer Electronics',
+            'market_cap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD'
+        }
+        
+        assert downloader._validate_metadata_entry(valid_entry) is True
+    
+    def test_validate_metadata_entry_missing_field(self, tmp_path):
+        """Should return False when any required field missing"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Missing 'sector' field
+        incomplete_entry = {
+            'symbol': 'AAPL',
+            'name': 'Apple Inc.',
+            'industry': 'Consumer Electronics',
+            'market_cap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD'
+        }
+        
+        assert downloader._validate_metadata_entry(incomplete_entry) is False
+    
+    def test_validate_metadata_entry_null_field(self, tmp_path):
+        """Should return False when field is None"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # 'sector' is None
+        null_entry = {
+            'symbol': 'AAPL',
+            'name': 'Apple Inc.',
+            'sector': None,
+            'industry': 'Consumer Electronics',
+            'market_cap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD'
+        }
+        
+        assert downloader._validate_metadata_entry(null_entry) is False
+    
+    def test_validate_metadata_entry_unexpected_fields(self, tmp_path):
+        """Should return False when entry has unexpected fields"""
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Has all required fields but also unexpected ones
+        entry_with_extra = {
+            'symbol': 'AAPL',
+            'name': 'Apple Inc.',
+            'sector': 'Technology',
+            'industry': 'Consumer Electronics',
+            'market_cap': 3000000000000,
+            'exchange': 'NASDAQ',
+            'currency': 'USD',
+            'extra_field': 'unexpected',
+            'another_unexpected': 123
+        }
+        
+        assert downloader._validate_metadata_entry(entry_with_extra) is False
