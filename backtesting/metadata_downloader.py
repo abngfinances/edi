@@ -361,3 +361,97 @@ class MetadataDownloader:
         error_msg = '\n'.join(error_lines)
         logger.error(error_msg)
         raise ValueError(error_msg)
+    
+    def update_metadata(self, rate_limit_delay: float = 1.0) -> Dict[str, any]:
+        """
+        Orchestrate the full metadata update process.
+        
+        This method combines all phases:
+        1. Load constituents
+        2. Load existing metadata
+        3. Plan updates (diff)
+        4. Download new metadata
+        5. Delete removed symbols and merge new metadata
+        6. Save updated metadata
+        7. Validate ignore symbols
+        
+        Args:
+            rate_limit_delay: Delay in seconds between yfinance requests (default: 1.0)
+            
+        Returns:
+            Dictionary with statistics about the update:
+            - constituents_count: Number of constituent symbols
+            - to_delete_count: Number of symbols removed
+            - to_add_count: Number of symbols to add
+            - failed_count: Number of failed downloads
+            - metadata_count: Final metadata count
+            
+        Raises:
+            ValueError: If validation fails or required files missing
+        """
+        logger.info(f"Starting metadata update for {self.index_symbol}")
+        
+        # Phase 1: Load data
+        logger.info("Phase 1: Loading constituents and existing metadata")
+        constituents = self.load_constituents()
+        metadata = self.load_metadata()
+        
+        logger.info(f"Loaded {len(constituents)} constituents, {len(metadata)} existing metadata entries")
+        
+        # Phase 2: Plan updates
+        logger.info("Phase 2: Planning updates")
+        to_delete, to_add = self.plan_updates(constituents, metadata)
+        
+        logger.info(f"Plan: delete {len(to_delete)} symbols, add {len(to_add)} symbols")
+        if to_delete:
+            logger.info(f"Symbols to delete: {sorted(to_delete)}")
+        if to_add:
+            logger.info(f"Symbols to add: {sorted(to_add)}")
+        
+        # Phase 3: Download new metadata
+        failed_symbols = set()
+        if to_add:
+            logger.info(f"Phase 3: Downloading metadata for {len(to_add)} symbols")
+            failed_symbols, new_metadata = self.download_metadata_batch(
+                to_add, 
+                rate_limit_delay=rate_limit_delay
+            )
+            
+            if failed_symbols:
+                logger.warning(f"Failed to download {len(failed_symbols)} symbols: {sorted(failed_symbols)}")
+            
+            logger.info(f"Successfully downloaded {len(new_metadata)} symbols")
+        else:
+            logger.info("Phase 3: No new symbols to download")
+            new_metadata = {}
+        
+        # Phase 4: Delete removed symbols and merge new metadata
+        logger.info("Phase 4: Updating metadata")
+        for symbol in to_delete:
+            del metadata[symbol]
+            logger.debug(f"Deleted {symbol} from metadata")
+        
+        metadata.update(new_metadata)
+        logger.info(f"Updated metadata: {len(metadata)} total entries")
+        
+        # Phase 5: Save metadata
+        logger.info("Phase 5: Saving metadata to file")
+        self.save_metadata(metadata)
+        logger.info(f"Metadata saved to {self.metadata_file}")
+        
+        # Phase 6: Validate ignore symbols
+        logger.info("Phase 6: Validating ignore symbols")
+        self.validate_ignore_symbols(failed_symbols)
+        logger.info("Ignore symbols validation passed")
+        
+        # Summary
+        stats = {
+            'constituents_count': len(constituents),
+            'to_delete_count': len(to_delete),
+            'to_add_count': len(to_add),
+            'failed_count': len(failed_symbols),
+            'metadata_count': len(metadata)
+        }
+        
+        logger.info(f"Metadata update complete: {stats}")
+        return stats

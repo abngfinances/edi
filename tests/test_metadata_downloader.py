@@ -1032,3 +1032,306 @@ class TestValidateIgnoreSymbols:
         assert '--ignore-symbols' in error_msg
         # Fix command should contain both A and C
         assert ('A,C' in error_msg or 'C,A' in error_msg)
+
+
+# ============================================================================
+# PHASE 5, STEP 5.1: Orchestration Method Tests
+# ============================================================================
+
+class TestUpdateMetadata:
+    """Test complete metadata update orchestration"""
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_update_metadata_initial_download(self, mock_ticker, mock_sleep, tmp_path):
+        """Should successfully download all metadata when starting from empty"""
+        # Create constituents file with 3 symbols
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['AAPL', 'MSFT', 'GOOGL'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance for all symbols
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000000,
+                'exchange': 'NASDAQ',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Run update
+        stats = downloader.update_metadata(rate_limit_delay=0.1)
+        
+        # Verify statistics
+        assert stats['constituents_count'] == 3
+        assert stats['to_delete_count'] == 0
+        assert stats['to_add_count'] == 3
+        assert stats['failed_count'] == 0
+        assert stats['metadata_count'] == 3
+        
+        # Verify metadata file was created
+        assert downloader.metadata_file.exists()
+        
+        # Verify content
+        with open(downloader.metadata_file, 'r') as f:
+            metadata = json.load(f)
+        
+        assert len(metadata) == 3
+        assert 'AAPL' in metadata
+        assert 'MSFT' in metadata
+        assert 'GOOGL' in metadata
+        
+        # Verify all entries have timestamps
+        for symbol in ['AAPL', 'MSFT', 'GOOGL']:
+            assert 'last_updated' in metadata[symbol]
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_update_metadata_add_and_delete(self, mock_ticker, mock_sleep, tmp_path):
+        """Should handle both adding new symbols and deleting old ones"""
+        # Create constituents file with A and C
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'C'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Create existing metadata with A and B
+        metadata_file = tmp_path / 'spy_metadata.json'
+        with open(metadata_file, 'w') as f:
+            json.dump({
+                'A': {
+                    'symbol': 'A',
+                    'name': 'Company A',
+                    'sector': 'Technology',
+                    'industry': 'Software',
+                    'market_cap': 1000000,
+                    'exchange': 'NYSE',
+                    'currency': 'USD',
+                    'last_updated': '2025-12-29T10:00:00Z'
+                },
+                'B': {
+                    'symbol': 'B',
+                    'name': 'Company B',
+                    'sector': 'Finance',
+                    'industry': 'Banking',
+                    'market_cap': 2000000,
+                    'exchange': 'NYSE',
+                    'currency': 'USD',
+                    'last_updated': '2025-12-29T10:00:00Z'
+                }
+            }, f)
+        
+        # Mock yfinance for symbol C
+        def mock_ticker_side_effect(symbol):
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 3000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Run update
+        stats = downloader.update_metadata(rate_limit_delay=0.1)
+        
+        # Verify statistics
+        assert stats['constituents_count'] == 2
+        assert stats['to_delete_count'] == 1  # B removed
+        assert stats['to_add_count'] == 1     # C added
+        assert stats['failed_count'] == 0
+        assert stats['metadata_count'] == 2   # A and C
+        
+        # Verify content
+        with open(downloader.metadata_file, 'r') as f:
+            metadata = json.load(f)
+        
+        assert len(metadata) == 2
+        assert 'A' in metadata
+        assert 'C' in metadata
+        assert 'B' not in metadata  # Should be deleted
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_update_metadata_no_changes(self, mock_ticker, mock_sleep, tmp_path):
+        """Should handle case when metadata is already up-to-date"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Create matching metadata
+        metadata_file = tmp_path / 'spy_metadata.json'
+        with open(metadata_file, 'w') as f:
+            json.dump({
+                'A': {
+                    'symbol': 'A',
+                    'name': 'Company A',
+                    'sector': 'Technology',
+                    'industry': 'Software',
+                    'market_cap': 1000000,
+                    'exchange': 'NYSE',
+                    'currency': 'USD',
+                    'last_updated': '2025-12-29T10:00:00Z'
+                },
+                'B': {
+                    'symbol': 'B',
+                    'name': 'Company B',
+                    'sector': 'Finance',
+                    'industry': 'Banking',
+                    'market_cap': 2000000,
+                    'exchange': 'NYSE',
+                    'currency': 'USD',
+                    'last_updated': '2025-12-29T10:00:00Z'
+                }
+            }, f)
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),
+            output_dir=str(tmp_path)
+        )
+        
+        # Run update
+        stats = downloader.update_metadata(rate_limit_delay=0.1)
+        
+        # Verify statistics - no changes
+        assert stats['constituents_count'] == 2
+        assert stats['to_delete_count'] == 0
+        assert stats['to_add_count'] == 0
+        assert stats['failed_count'] == 0
+        assert stats['metadata_count'] == 2
+        
+        # yfinance should not have been called
+        mock_ticker.assert_not_called()
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_update_metadata_with_failures_and_ignores(self, mock_ticker, mock_sleep, tmp_path):
+        """Should handle download failures correctly when they match ignore_symbols"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B', 'C'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance - symbol 'B' will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol == 'B':
+                raise Exception("Download failed for B")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols={'B'},  # B is expected to fail
+            output_dir=str(tmp_path)
+        )
+        
+        # Run update - should succeed because B is in ignore_symbols
+        stats = downloader.update_metadata(rate_limit_delay=0.1)
+        
+        # Verify statistics
+        assert stats['constituents_count'] == 3
+        assert stats['to_delete_count'] == 0
+        assert stats['to_add_count'] == 3
+        assert stats['failed_count'] == 1
+        assert stats['metadata_count'] == 2  # Only A and C
+        
+        # Verify content
+        with open(downloader.metadata_file, 'r') as f:
+            metadata = json.load(f)
+        
+        assert len(metadata) == 2
+        assert 'A' in metadata
+        assert 'C' in metadata
+        assert 'B' not in metadata
+    
+    @patch('backtesting.metadata_downloader.time.sleep')
+    @patch('backtesting.metadata_downloader.yf.Ticker')
+    def test_update_metadata_with_unexpected_failures(self, mock_ticker, mock_sleep, tmp_path):
+        """Should raise ValueError when download fails for symbol not in ignore_symbols"""
+        # Create constituents file
+        constituents_file = tmp_path / 'spy_constituents.json'
+        with open(constituents_file, 'w') as f:
+            json.dump({
+                'symbols': ['A', 'B'],
+                'metadata': {'index_symbol': 'SPY'}
+            }, f)
+        
+        # Mock yfinance - symbol 'B' will fail
+        def mock_ticker_side_effect(symbol):
+            if symbol == 'B':
+                raise Exception("Download failed for B")
+            mock_instance = Mock()
+            mock_instance.info = {
+                'symbol': symbol,
+                'shortName': f'{symbol} Company',
+                'sector': 'Technology',
+                'industry': 'Software',
+                'marketCap': 1000000,
+                'exchange': 'NYSE',
+                'currency': 'USD'
+            }
+            return mock_instance
+        
+        mock_ticker.side_effect = mock_ticker_side_effect
+        
+        downloader = MetadataDownloader(
+            index_symbol='SPY',
+            ignore_symbols=set(),  # No ignores - B failure is unexpected
+            output_dir=str(tmp_path)
+        )
+        
+        # Should raise ValueError due to validation failure
+        with pytest.raises(ValueError) as exc_info:
+            downloader.update_metadata(rate_limit_delay=0.1)
+        
+        error_msg = str(exc_info.value)
+        assert 'failed_symbols != ignore_symbols' in error_msg.lower()
+        assert "{'B'}" in error_msg
