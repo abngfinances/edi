@@ -15,12 +15,16 @@ export ALPACA_SECRET_KEY="MyHKc3nJPBTxQMUBJV7CFcBWnco6bPo5SuYqvBQDeY2"
 export ALPACA_BASE_URL="https://paper-api.alpaca.markets"
 
 # Financial Modeling Prep (FMP) API Key
-export FMP_API_KEY="YoMMCtuznflx1p1NEQmm4e8QJSeWnARd"
+export FMP_API_KEY="oMMCtuznflx1p1NEQmm4e8QJSeWnARdk"
+
+# Index symbol for backtesting and data download
+export INDEX_SYMBOL="SPY"
 
 echo "Environment variables set for the current shell session."
 echo "ALPACA_API_KEY: $ALPACA_API_KEY"
 echo "ALPACA_BASE_URL: $ALPACA_BASE_URL"
 echo "FMP_API_KEY: $FMP_API_KEY"
+echo "INDEX_SYMBOL: $INDEX_SYMBOL"
 # Note: ALPACA_SECRET_KEY is intentionally not echoed for security reasons.
 #
 # Alpaca 2FA recovery
