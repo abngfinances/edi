@@ -238,10 +238,16 @@ def main():
         logger.info(f"Output file: {result['output_path']}")
         logger.info(f"Download timestamp: {result['download_timestamp']}")
         
+        return 0
+        
+    except ValueError as e:
+        logger.error(f"Download failed: {str(e)}")
+        return 1
+    
     except Exception as e:
         logger.error(f"Download failed: {str(e)}")
-        raise
+        return 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
