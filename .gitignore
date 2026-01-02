@@ -3,5 +3,6 @@ backtest_data
 credentials
 backtesting/__pycache__
 strategy/__pycache__
+tests/__pycache__
 backtest_results
 backtest_results
