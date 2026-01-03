@@ -691,3 +691,287 @@ class TestPriceDownloaderInitialization:
         assert 'must be before today' in str(exc_info.value)
         assert 'partial trading day' in str(exc_info.value)
         assert '2020-06-14' in str(exc_info.value)  # Should suggest yesterday
+
+
+# ============================================================================
+# PHASE 3: Metadata & Folder Structure Tests
+# ============================================================================
+
+class TestMetadataAndFolderStructure:
+    """Test metadata file operations and folder structure"""
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_symbol_folder_path(self, mock_file, mock_exists):
+        """Should construct correct folder path for symbol"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Verify folder structure
+        folder = downloader._get_symbol_folder('AAPL')
+        assert folder == Path('backtest_data/AAPL/yfinance_1d')
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_metadata_path(self, mock_file, mock_exists):
+        """Should construct correct metadata file path"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['MSFT']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Verify metadata path
+        metadata_path = downloader._get_metadata_path('MSFT')
+        assert metadata_path == Path('backtest_data/MSFT/yfinance_1d/metadata.json')
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_prices_path(self, mock_file, mock_exists):
+        """Should construct correct prices file path"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['GOOGL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Verify prices path
+        prices_path = downloader._get_prices_path('GOOGL')
+        assert prices_path == Path('backtest_data/GOOGL/yfinance_1d/prices.parquet')
+    
+    @patch('builtins.open', new_callable=mock_open)
+    def test_read_metadata_file_not_exists(self, mock_file):
+        """Should return None when metadata file doesn't exist"""
+        # Setup mock for constituents
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Patch exists after initialization to simulate metadata file not existing
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            metadata = downloader._read_metadata('AAPL')
+            assert metadata is None
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_read_metadata_success(self, mock_file, mock_exists):
+        """Should successfully read valid metadata file"""
+        # Setup mock
+        mock_exists.return_value = True
+        
+        # Mock will be called twice: once for constituents, once for metadata
+        constituents_data = {'symbols': ['AAPL']}
+        metadata_data = {
+            'symbol': 'AAPL',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {'2020-08-31': 4.0},
+            'dividends': {'2020-02-07': 0.77},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(metadata_data)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Verify metadata is read correctly
+        metadata = downloader._read_metadata('AAPL')
+        assert metadata is not None
+        assert metadata['symbol'] == 'AAPL'
+        assert metadata['interval'] == '1d'
+        assert metadata['source'] == 'yfinance'
+        assert metadata['start_date'] == '2020-01-01'
+        assert metadata['end_date'] == '2020-12-31'
+        assert metadata['total_days'] == 252
+        assert metadata['splits'] == {'2020-08-31': 4.0}
+        assert metadata['dividends'] == {'2020-02-07': 0.77}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_read_metadata_missing_required_fields(self, mock_file, mock_exists):
+        """Should raise ValueError if metadata missing required fields"""
+        # Setup mock
+        mock_exists.return_value = True
+        
+        constituents_data = {'symbols': ['AAPL']}
+        incomplete_metadata = {
+            'start_date': '2020-01-01',
+            # Missing: symbol, interval, source, end_date, total_days, splits, dividends, last_updated
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(incomplete_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Verify raises error
+        with pytest.raises(ValueError) as exc_info:
+            downloader._read_metadata('AAPL')
+        
+        assert 'missing required fields' in str(exc_info.value).lower()
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('backtesting.price_data_source.Path.mkdir')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_write_metadata_includes_all_required_fields(self, mock_file, mock_mkdir, mock_exists):
+        """Should write metadata with all required fields validated"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Capture what gets written to the file
+        written_content = []
+        def write_side_effect(content):
+            written_content.append(content)
+            return len(content)
+        
+        mock_file.return_value.write.side_effect = write_side_effect
+        
+        # Write metadata
+        downloader._write_metadata(
+            symbol='AAPL',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            total_days=252,
+            splits={'2020-08-31': 4.0},
+            dividends={'2020-02-07': 0.77}
+        )
+        
+        # Verify mkdir was called
+        mock_mkdir.assert_called()
+        
+        # Parse the written JSON
+        written_json = ''.join(written_content)
+        metadata = json.loads(written_json)
+        
+        # Verify all required fields are present
+        required_fields = {
+            'symbol', 'interval', 'source',
+            'start_date', 'end_date', 'total_days',
+            'splits', 'dividends', 'last_updated'
+        }
+        assert set(metadata.keys()) == required_fields, f"Field mismatch. Got: {set(metadata.keys())}"
+        
+        # Verify field values
+        assert metadata['symbol'] == 'AAPL'
+        assert metadata['interval'] == '1d'
+        assert metadata['source'] == 'yfinance'
+        assert metadata['start_date'] == '2020-01-01'
+        assert metadata['end_date'] == '2020-12-31'
+        assert metadata['total_days'] == 252
+        assert metadata['splits'] == {'2020-08-31': 4.0}
+        assert metadata['dividends'] == {'2020-02-07': 0.77}
+        assert metadata['last_updated'].endswith('Z')  # ISO format with UTC
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('backtesting.price_data_source.Path.mkdir')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_write_metadata_captures_instance_interval(self, mock_file, mock_mkdir, mock_exists):
+        """Should capture interval and source from downloader instance"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['MSFT']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute with non-default interval
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1wk',  # Non-default
+            source='yfinance'
+        )
+        
+        # Capture writes
+        written_content = []
+        mock_file.return_value.write.side_effect = lambda c: written_content.append(c) or len(c)
+        
+        # Write metadata
+        downloader._write_metadata(
+            symbol='MSFT',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            total_days=52,
+            splits={},
+            dividends={'2020-05-20': 0.51}
+        )
+        
+        # Parse written JSON
+        written_json = ''.join(written_content)
+        metadata = json.loads(written_json)
+        
+        # Verify interval/source from downloader instance
+        assert metadata['interval'] == '1wk'
+        assert metadata['source'] == 'yfinance'
+        assert metadata['symbol'] == 'MSFT'

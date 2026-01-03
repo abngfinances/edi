@@ -392,4 +392,140 @@ class PriceDownloader:
             raise ValueError(f"Invalid JSON in constituents file {constituents_file}: {e}")
         except Exception as e:
             raise ValueError(f"Failed to load constituents from {constituents_file}: {e}")
+    
+    def _get_symbol_folder(self, symbol: str) -> Path:
+        """
+        Get folder path for a symbol's data.
+        
+        Structure: {output_dir}/{symbol}/{source}_{interval}/
+        Example: backtest_data/AAPL/yfinance_1d/
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Path to symbol's data folder
+        """
+        return self.output_dir / symbol / f"{self.source}_{self.interval}"
+    
+    def _get_metadata_path(self, symbol: str) -> Path:
+        """
+        Get metadata file path for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Path to metadata.json file
+        """
+        return self._get_symbol_folder(symbol) / 'metadata.json'
+    
+    def _get_prices_path(self, symbol: str) -> Path:
+        """
+        Get prices file path for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Path to prices.parquet file
+        """
+        return self._get_symbol_folder(symbol) / 'prices.parquet'
+    
+    def _read_metadata(self, symbol: str) -> Optional[Dict]:
+        """
+        Read existing metadata for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Metadata dictionary if file exists, None otherwise
+            
+        Raises:
+            ValueError: If metadata file is corrupted or missing required fields
+        """
+        metadata_path = self._get_metadata_path(symbol)
+        
+        if not metadata_path.exists():
+            return None
+        
+        try:
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+            
+            # Validate required fields (all fields needed for Phase 4 date range planning)
+            required_fields = {
+                'symbol', 'interval', 'source',
+                'start_date', 'end_date', 'total_days',
+                'splits', 'dividends', 'last_updated'
+            }
+            missing_fields = required_fields - set(metadata.keys())
+            if missing_fields:
+                raise ValueError(f"Metadata missing required fields: {missing_fields}")
+            
+            return metadata
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Corrupted metadata for {symbol}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to read metadata for {symbol}: {e}")
+    
+    def _write_metadata(self, symbol: str, start_date: str, end_date: str,
+                       total_days: int, splits: Dict[str, float], 
+                       dividends: Dict[str, float]) -> None:
+        """
+        Write metadata for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            start_date: Start date of data (YYYY-MM-DD)
+            end_date: End date of data (YYYY-MM-DD)
+            total_days: Number of trading days
+            splits: Dict mapping date string -> split ratio (e.g., {'2020-08-31': 4.0})
+            dividends: Dict mapping date string -> dividend amount (e.g., {'2020-02-07': 0.77})
+                
+        Raises:
+            ValueError: If metadata format is invalid
+        """
+        # Build metadata dictionary with all required fields
+        metadata = {
+            'symbol': symbol,
+            'interval': self.interval,
+            'source': self.source,
+            'start_date': start_date,
+            'end_date': end_date,
+            'total_days': total_days,
+            'splits': splits,
+            'dividends': dividends,
+            'last_updated': datetime.utcnow().isoformat() + 'Z'
+        }
+        
+        # Validate all required fields present
+        required_fields = {
+            'symbol', 'interval', 'source',
+            'start_date', 'end_date', 'total_days',
+            'splits', 'dividends', 'last_updated'
+        }
+        missing_fields = required_fields - set(metadata.keys())
+        if missing_fields:
+            raise ValueError(f"Metadata missing required fields: {missing_fields}")
+        
+        # Verify no None values in required fields
+        none_fields = [k for k, v in metadata.items() if v is None]
+        if none_fields:
+            raise ValueError(f"Metadata has None values for fields: {none_fields}")
+        
+        # Create folder if it doesn't exist
+        metadata_path = self._get_metadata_path(symbol)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.debug(f"Wrote metadata for {symbol}: {start_date} to {end_date}")
+            
+        except Exception as e:
+            raise ValueError(f"Failed to write metadata for {symbol}: {e}")
 
