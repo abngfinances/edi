@@ -10,10 +10,11 @@ import logging
 import pytest
 import pandas as pd
 import time
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, mock_open
 from concurrent.futures import ThreadPoolExecutor
-from backtesting.price_data_source import PriceDataSource, YFinanceSource
+from backtesting.price_data_source import PriceDataSource, YFinanceSource, PriceDownloader
 
 # Configure logging for tests
 logging.basicConfig(
@@ -98,7 +99,7 @@ class TestDownloadSymbol:
         mock_ticker_class.assert_called_once_with('AAPL')
         mock_ticker.history.assert_called_once_with(
             start='2020-01-01',
-            end='2020-01-03',
+            end='2020-01-04',  # Adjusted +1 day for inclusive behavior
             interval='1d',
             auto_adjust=True,
             prepost=False
@@ -259,6 +260,41 @@ class TestDownloadSymbol:
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         for col in required_cols:
             assert col in result['prices'].columns
+    
+    @patch('backtesting.price_data_source.yf.Ticker')
+    def test_download_symbol_single_day_inclusive(self, mock_ticker_class):
+        """Should download single day when start_date == end_date (inclusive behavior)"""
+        # Setup mock
+        mock_ticker = Mock()
+        mock_prices = pd.DataFrame({
+            'Open': [100.0],
+            'High': [105.0],
+            'Low': [99.0],
+            'Close': [104.0],
+            'Volume': [1000000]
+        }, index=pd.date_range('2020-01-02', periods=1, freq='D'))
+        
+        mock_ticker.history.return_value = mock_prices
+        mock_ticker.splits = pd.Series([], dtype=float)
+        mock_ticker.dividends = pd.Series([], dtype=float)
+        mock_ticker_class.return_value = mock_ticker
+        
+        # Execute with start == end
+        source = YFinanceSource()
+        result = source.download_symbol('AAPL', '2020-01-02', '2020-01-02')
+        
+        # Verify yfinance was called with adjusted end_date (+1 day)
+        mock_ticker.history.assert_called_once_with(
+            start='2020-01-02',
+            end='2020-01-03',  # Should be adjusted to next day
+            interval='1d',
+            auto_adjust=True,
+            prepost=False
+        )
+        
+        # Verify result has data
+        assert len(result['prices']) == 1
+        assert result['prices']['Close'].iloc[0] == 104.0
 
 
 # ============================================================================
@@ -451,3 +487,207 @@ class TestDownloadBatchParallel:
         assert len(failed) == 0
         assert 'AAPL' in results
         assert call_count[0] == 2  # First failed, second succeeded
+
+
+# ============================================================================
+# PHASE 2: PriceDownloader Initialization Tests
+# ============================================================================
+
+class TestPriceDownloaderInitialization:
+    """Test PriceDownloader initialization with validation"""
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_initialization_with_valid_params(self, mock_file, mock_exists):
+        """Should initialize successfully with valid parameters"""
+        # Setup mock for constituents file
+        mock_exists.return_value = True
+        constituents_data = {
+            'symbols': ['AAPL', 'MSFT', 'GOOGL'],
+            'metadata': {'index_symbol': 'SPY'}
+        }
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='test_data/metadata',
+            output_dir='test_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Verify
+        assert downloader.index_symbol == 'SPY'
+        assert downloader.start_date == '2020-01-01'
+        assert downloader.end_date == '2020-12-31'
+        assert downloader.interval == '1d'
+        assert downloader.source == 'yfinance'
+        assert downloader.output_dir == Path('test_data')
+        assert downloader.metadata_dir == Path('test_data/metadata')
+        assert len(downloader.constituents) == 3
+        assert downloader.constituents == ['AAPL', 'MSFT', 'GOOGL']
+        assert isinstance(downloader.data_source, YFinanceSource)
+    
+    def test_initialization_validates_date_format(self):
+        """Should raise ValueError for invalid date format"""
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='01-01-2020',  # Invalid format
+                end_date='2020-12-31'
+            )
+        
+        assert 'YYYY-MM-DD' in str(exc_info.value)
+        assert 'start_date' in str(exc_info.value)
+    
+    def test_initialization_validates_date_order(self):
+        """Should raise ValueError if start_date > end_date"""
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='2020-12-31',
+                end_date='2020-01-01'  # Before start_date
+            )
+        
+        assert 'start_date must be <=' in str(exc_info.value)
+    
+    @patch('backtesting.price_data_source.datetime')
+    def test_initialization_validates_future_dates(self, mock_datetime):
+        """Should raise ValueError if end_date is today or in the future"""
+        # Mock current date to 2020-06-01 (using a Mock that acts like datetime)
+        mock_now_result = Mock()
+        mock_now_result.replace.return_value = datetime(2020, 6, 1)
+        mock_datetime.now.return_value = mock_now_result
+        mock_datetime.strptime = datetime.strptime  # Keep real strptime
+        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+        
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='2020-01-01',
+                end_date='2020-06-01'  # Today's date (mocked)
+            )
+        
+        assert 'must be before today' in str(exc_info.value)
+        assert 'partial trading day' in str(exc_info.value)
+    
+    def test_initialization_validates_interval(self):
+        """Should raise ValueError for invalid interval"""
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='2020-01-01',
+                end_date='2020-12-31',
+                interval='5m'  # Invalid for this use case
+            )
+        
+        assert 'Invalid interval' in str(exc_info.value)
+        assert '5m' in str(exc_info.value)
+    
+    def test_initialization_validates_source(self):
+        """Should raise ValueError for invalid source"""
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='2020-01-01',
+                end_date='2020-12-31',
+                source='alphavantage'  # Invalid source
+            )
+        
+        assert 'Invalid source' in str(exc_info.value)
+        assert 'alphavantage' in str(exc_info.value)
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_initialization_loads_and_filters_constituents(self, mock_file, mock_exists):
+        """Should load constituents and filter ignore_symbols"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {
+            'symbols': ['AAPL', 'MSFT', 'GOOGL', 'BRK.B', 'AMZN']
+        }
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute with ignore_symbols
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='test_data/metadata',
+            output_dir='test_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            ignore_symbols={'BRK.B', 'AMZN'}
+        )
+        
+        # Verify filtering worked
+        assert len(downloader.constituents) == 3
+        assert 'AAPL' in downloader.constituents
+        assert 'MSFT' in downloader.constituents
+        assert 'GOOGL' in downloader.constituents
+        assert 'BRK.B' not in downloader.constituents
+        assert 'AMZN' not in downloader.constituents
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_initialization_allows_equal_start_end_dates(self, mock_file, mock_exists):
+        """Should allow start_date == end_date (single day download)"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute - should NOT raise ValueError
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='test_data/metadata',
+            output_dir='test_data',
+            start_date='2020-01-02',
+            end_date='2020-01-02'  # Same as start_date
+        )
+        
+        # Verify initialization succeeded
+        assert downloader.start_date == '2020-01-02'
+        assert downloader.end_date == '2020-01-02'
+    
+    @patch('backtesting.price_data_source.datetime')
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_initialization_rejects_todays_date(self, mock_file, mock_exists, mock_datetime):
+        """Should reject today's date to avoid partial trading day data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Mock current date to 2020-06-15
+        mock_now_result = Mock()
+        mock_now_result.replace.return_value = datetime(2020, 6, 15)
+        mock_datetime.now.return_value = mock_now_result
+        mock_datetime.strptime = datetime.strptime
+        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+        
+        # Try to use today's date as end_date
+        with pytest.raises(ValueError) as exc_info:
+            PriceDownloader(
+                index_symbol='SPY',
+                metadata_dir='test_data/metadata',
+                output_dir='test_data',
+                start_date='2020-06-01',
+                end_date='2020-06-15'  # Today's date
+            )
+        
+        assert 'must be before today' in str(exc_info.value)
+        assert 'partial trading day' in str(exc_info.value)
+        assert '2020-06-14' in str(exc_info.value)  # Should suggest yesterday

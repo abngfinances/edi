@@ -5,13 +5,15 @@ Provides abstract interface and implementations for downloading historical price
 Supports parallel downloads with proper rate limiting and error handling.
 """
 
+import json
 import logging
 import time
 import yfinance as yf
 import pandas as pd
 from abc import ABC, abstractmethod
 from typing import Dict, Set, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -89,8 +91,8 @@ class YFinanceSource(PriceDataSource):
         
         Args:
             symbol: Stock symbol to download
-            start_date: Start date in 'YYYY-MM-DD' format
-            end_date: End date in 'YYYY-MM-DD' format
+            start_date: Start date in 'YYYY-MM-DD' format (INCLUSIVE)
+            end_date: End date in 'YYYY-MM-DD' format (INCLUSIVE)
             
         Returns:
             Dictionary with:
@@ -101,15 +103,20 @@ class YFinanceSource(PriceDataSource):
         Raises:
             ValueError: If download fails or data is invalid
         """
-        logger.debug(f"Downloading {symbol} from {start_date} to {end_date}")
-        
         try:
+            # Adjust end_date +1 day to make it inclusive (yfinance uses exclusive end)
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            end_dt_adjusted = end_dt + timedelta(days=1)
+            end_date_yf = end_dt_adjusted.strftime('%Y-%m-%d')
+            
+            logger.debug(f"Downloading {symbol} from {start_date} to {end_date} (inclusive)")
+            
             ticker = yf.Ticker(symbol)
             
             # Download price history
             prices = ticker.history(
                 start=start_date,
-                end=end_date,
+                end=end_date_yf,
                 interval=self.interval,
                 auto_adjust=self.auto_adjust,
                 prepost=self.prepost
@@ -236,3 +243,153 @@ class YFinanceSource(PriceDataSource):
             time.sleep(rate_limit_delay)
         
         return failed_symbols, results_dict
+
+
+class PriceDownloader:
+    """
+    High-level price downloader that orchestrates data downloads for an index.
+    
+    Responsibilities:
+    - Validate all inputs (dates, intervals, etc.)
+    - Load constituents and filter ignore symbols
+    - Manage data source (yfinance)
+    - Plan date ranges and merge logic (Phase 4-5)
+    - Checkpoint progress (Phase 6)
+    - Orchestrate batch downloads (Phase 7)
+    """
+    
+    VALID_INTERVALS = {'1d', '1wk', '1mo'}
+    VALID_SOURCES = {'yfinance'}
+    
+    def __init__(self,
+                 index_symbol: str,
+                 metadata_dir: str,
+                 output_dir: str,
+                 start_date: str,
+                 end_date: str,
+                 interval: str = '1d',
+                 source: str = 'yfinance',
+                 ignore_symbols: Optional[Set[str]] = None,
+                 batch_size: int = 10,
+                 max_workers: int = 5):
+        """
+        Initialize PriceDownloader with validation.
+        
+        Args:
+            index_symbol: Index to download (e.g., 'SPY', 'IWM')
+            metadata_dir: Directory containing constituent files (REQUIRED)
+            output_dir: Root directory for price data (REQUIRED)
+            start_date: Start date in 'YYYY-MM-DD' format
+            end_date: End date in 'YYYY-MM-DD' format
+            interval: Price interval ('1d', '1wk', '1mo')
+            source: Data source ('yfinance')
+            ignore_symbols: Symbols to exclude from download
+            batch_size: Number of symbols to download per batch (for checkpointing)
+            max_workers: Maximum concurrent downloads within a batch
+            
+        Raises:
+            ValueError: If any validation fails
+        """
+        # Validate dates
+        self.start_date = self._validate_date_format(start_date, 'start_date')
+        self.end_date = self._validate_date_format(end_date, 'end_date')
+        self._validate_date_order(self.start_date, self.end_date)
+        self._validate_not_future(self.end_date)
+        
+        # Validate interval
+        if interval not in self.VALID_INTERVALS:
+            raise ValueError(f"Invalid interval '{interval}'. Must be one of {self.VALID_INTERVALS}")
+        self.interval = interval
+        
+        # Validate source
+        if source not in self.VALID_SOURCES:
+            raise ValueError(f"Invalid source '{source}'. Must be one of {self.VALID_SOURCES}")
+        self.source = source
+        
+        # Store config
+        self.index_symbol = index_symbol
+        self.metadata_dir = Path(metadata_dir)
+        self.output_dir = Path(output_dir)
+        self.ignore_symbols = ignore_symbols or set()
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        
+        # Load constituents
+        self.constituents = self._load_constituents()
+        
+        # Create data source
+        self.data_source = YFinanceSource(
+            interval=self.interval,
+            max_workers=self.max_workers
+        )
+        
+        logger.info(f"Initialized PriceDownloader: {self.index_symbol}, "
+                   f"{len(self.constituents)} constituents, "
+                   f"{self.start_date} to {self.end_date} (inclusive)")
+    
+    def _validate_date_format(self, date_str: str, param_name: str) -> str:
+        """Validate date is in YYYY-MM-DD format."""
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except ValueError:
+            raise ValueError(f"{param_name} must be in 'YYYY-MM-DD' format, got '{date_str}'")
+    
+    def _validate_date_order(self, start_date: str, end_date: str):
+        """Validate start_date is before or equal to end_date."""
+        start = datetime.strptime(start_date, '%Y-%m-%d')
+        end = datetime.strptime(end_date, '%Y-%m-%d')
+        if start > end:
+            raise ValueError(f"start_date must be <= end_date, got {start_date} > {end_date}")
+    
+    def _validate_not_future(self, date_str: str):
+        """Validate date is not today or in the future (at most yesterday)."""
+        date = datetime.strptime(date_str, '%Y-%m-%d')
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if date >= today:
+            yesterday = (today - timedelta(days=1)).strftime('%Y-%m-%d')
+            raise ValueError(
+                f"end_date must be before today (at most {yesterday}) to avoid "
+                f"partial trading day data, got {date_str}"
+            )
+    
+    def _load_constituents(self) -> list:
+        """
+        Load constituents from metadata file and filter ignore_symbols.
+        
+        Returns:
+            List of symbol strings after filtering
+            
+        Raises:
+            ValueError: If constituent file not found or invalid format
+        """
+        constituents_file = self.metadata_dir / f'{self.index_symbol.lower()}_constituents.json'
+        
+        if not constituents_file.exists():
+            raise ValueError(f"Constituents file not found: {constituents_file}")
+        
+        try:
+            with open(constituents_file, 'r') as f:
+                data = json.load(f)
+            
+            if 'symbols' not in data:
+                raise ValueError(f"Invalid constituents file: missing 'symbols' key in {constituents_file}")
+            
+            symbols = data['symbols']
+            if not isinstance(symbols, list):
+                raise ValueError(f"Invalid constituents file: 'symbols' must be a list in {constituents_file}")
+            
+            # Filter ignore_symbols
+            filtered = [s for s in symbols if s not in self.ignore_symbols]
+            
+            if self.ignore_symbols:
+                logger.info(f"Filtered {len(symbols) - len(filtered)} ignored symbols, "
+                           f"{len(filtered)} remaining")
+            
+            return filtered
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in constituents file {constituents_file}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load constituents from {constituents_file}: {e}")
+
