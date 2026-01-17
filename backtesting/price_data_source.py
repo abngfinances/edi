@@ -528,4 +528,110 @@ class PriceDownloader:
             
         except Exception as e:
             raise ValueError(f"Failed to write metadata for {symbol}: {e}")
+    
+    def _plan_date_range(self, symbol: str, start: str, end: str) -> Optional[list]:
+        """
+        Plan date ranges to download based on existing metadata.
+        
+        Note: Different interval/source combinations use separate folders (e.g., yfinance_1d vs yfinance_1wk),
+        so there's no conflict when downloading multiple intervals or sources for the same symbol.
+        
+        Implements 6 merge cases:
+        1. No existing metadata → [(start, end)] (full download, includes new interval/source combos)
+        2. Subset: requested range within existing → None (skip, already have data)
+        3. Extend both: extends before AND after → [(start, existing_start-1), (existing_end+1, end)]
+        4. Extend after: contiguous extension beyond end → [(existing_end+1, end)]
+        5. Extend before: contiguous extension before start → [(start, existing_start-1)]
+        6. Gap: non-contiguous ranges → ERROR (raise ValueError)
+        
+        Args:
+            symbol: Stock symbol
+            start: Requested start date (YYYY-MM-DD, pre-validated)
+            end: Requested end date (YYYY-MM-DD, pre-validated)
+            
+        Returns:
+            None if data already exists (skip download)
+            List of (start, end) date tuples to download
+            
+        Raises:
+            ValueError: If date range has gaps (non-contiguous)
+        """
+        from datetime import datetime, timedelta
+        
+        # Load existing metadata
+        metadata = self._read_metadata(symbol)
+        
+        # Case 1: No existing data - download full range
+        # (This includes different interval/source combinations, which get separate folders)
+        if metadata is None:
+            logger.debug(
+                f"{symbol}: No existing metadata, downloading full range "
+                f"[{start}, {end}]"
+            )
+            return [(start, end)]
+        
+        # Parse dates
+        existing_start = datetime.strptime(metadata['start_date'], '%Y-%m-%d').date()
+        existing_end = datetime.strptime(metadata['end_date'], '%Y-%m-%d').date()
+        start_date = datetime.strptime(start, '%Y-%m-%d').date()
+        end_date = datetime.strptime(end, '%Y-%m-%d').date()
+        
+        # Case 2: Subset - new range completely within existing (skip)
+        if start_date >= existing_start and end_date <= existing_end:
+            logger.debug(
+                f"{symbol}: Requested [{start}, {end}] is subset of "
+                f"existing [{metadata['start_date']}, {metadata['end_date']}], skipping"
+            )
+            return None
+        
+        # Case 3: Extend both sides - new range extends before AND after existing
+        if start_date < existing_start and end_date > existing_end:
+            # Download two ranges: before and after
+            download_before_end = (existing_start - timedelta(days=1)).strftime('%Y-%m-%d')
+            download_after_start = (existing_end + timedelta(days=1)).strftime('%Y-%m-%d')
+            logger.debug(
+                f"{symbol}: Extending both sides. Existing: [{metadata['start_date']}, {metadata['end_date']}], "
+                f"downloading [{start}, {download_before_end}] and [{download_after_start}, {end}]"
+            )
+            return [(start, download_before_end), (download_after_start, end)]
+        
+        # Case 4: Extend after - new range extends beyond existing end
+        if start_date <= existing_end and end_date > existing_end:
+            # Download from day after existing_end to new_end
+            download_start = (existing_end + timedelta(days=1)).strftime('%Y-%m-%d')
+            logger.debug(
+                f"{symbol}: Extending after existing end {metadata['end_date']}, "
+                f"downloading [{download_start}, {end}]"
+            )
+            return [(download_start, end)]
+        
+        # Case 5: Extend before - new range extends before existing start
+        if end_date >= existing_start and start_date < existing_start:
+            # Download from new_start to day before existing_start
+            download_end = (existing_start - timedelta(days=1)).strftime('%Y-%m-%d')
+            logger.debug(
+                f"{symbol}: Extending before existing start {metadata['start_date']}, "
+                f"downloading [{start}, {download_end}]"
+            )
+            return [(start, download_end)]
+        
+        # Case 6: Gap - no overlap, new range is completely separate
+        # This is an error - user should fix their date ranges
+        if end_date < existing_start or start_date > existing_end:
+            raise ValueError(
+                f"Date range gap for {symbol}: "
+                f"Existing data covers [{metadata['start_date']}, {metadata['end_date']}], "
+                f"but you requested [{start}, {end}]. "
+                f"There is a gap between these ranges. "
+                f"Please request a contiguous date range that extends the existing data, "
+                f"or delete the existing data folder to start fresh."
+            )
+        
+        # Case 7: Complex overlap (shouldn't reach here with above logic, but defensive)
+        raise ValueError(
+            f"Unexpected date range scenario for {symbol}. "
+            f"Existing: [{metadata['start_date']}, {metadata['end_date']}], "
+            f"Requested: [{start}, {end}]. "
+            f"Please report this as a bug."
+        )
 

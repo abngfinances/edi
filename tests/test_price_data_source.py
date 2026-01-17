@@ -975,3 +975,411 @@ class TestMetadataAndFolderStructure:
         assert metadata['interval'] == '1wk'
         assert metadata['source'] == 'yfinance'
         assert metadata['symbol'] == 'MSFT'
+
+
+# ============================================================================
+# PHASE 4: Date Range Planning Tests
+# ============================================================================
+
+class TestDateRangePlanning:
+    """Test date range planning and merge logic"""
+    
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_no_existing_metadata(self, mock_file):
+        """Should return full range when no existing metadata"""
+        # Setup mock
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # No metadata file exists
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            ranges = downloader._plan_date_range('AAPL', '2020-01-01', '2020-12-31')
+        
+        # Should return full range
+        assert ranges == [('2020-01-01', '2020-12-31')]
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_subset_skip(self, mock_file, mock_exists):
+        """Should return None when requested range is subset of existing (skip download)"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        existing_metadata = {
+            'symbol': 'AAPL',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-06-01',  # Subset of existing
+            end_date='2020-09-30'
+        )
+        
+        # Request subset of existing range
+        ranges = downloader._plan_date_range('AAPL', '2020-06-01', '2020-09-30')
+        
+        # Should skip (return None)
+        assert ranges is None
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_extend_after(self, mock_file, mock_exists):
+        """Should download from existing_end+1 to new_end when extending after"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['MSFT']}
+        existing_metadata = {
+            'symbol': 'MSFT',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-06-30',  # Ends mid-year
+            'total_days': 126,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2020-07-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'  # Extend to end of year
+        )
+        
+        # Request range that extends beyond existing end
+        ranges = downloader._plan_date_range('MSFT', '2020-01-01', '2020-12-31')
+        
+        # Should download only the new part: 2020-07-01 to 2020-12-31
+        assert ranges == [('2020-07-01', '2020-12-31')]
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_extend_before(self, mock_file, mock_exists):
+        """Should download from new_start to existing_start-1 when extending before"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['GOOGL']}
+        existing_metadata = {
+            'symbol': 'GOOGL',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-07-01',  # Starts mid-year
+            'end_date': '2020-12-31',
+            'total_days': 126,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',  # Extend to start of year
+            end_date='2020-12-31'
+        )
+        
+        # Request range that extends before existing start
+        ranges = downloader._plan_date_range('GOOGL', '2020-01-01', '2020-12-31')
+        
+        # Should download only the new part: 2020-01-01 to 2020-06-30
+        assert ranges == [('2020-01-01', '2020-06-30')]
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_extend_both_sides(self, mock_file, mock_exists):
+        """Should download two ranges when extending both before and after existing data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AMZN']}
+        existing_metadata = {
+            'symbol': 'AMZN',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-06-01',  # Mid-year data only
+            'end_date': '2020-08-31',
+            'total_days': 92,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2020-09-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',  # Extends before existing
+            end_date='2020-12-31'      # AND after existing
+        )
+        
+        # Request range that extends both before and after
+        ranges = downloader._plan_date_range('AMZN', '2020-01-01', '2020-12-31')
+        
+        # Should download two ranges: before and after existing
+        assert ranges == [('2020-01-01', '2020-05-31'), ('2020-09-01', '2020-12-31')]
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_gap_after(self, mock_file, mock_exists):
+        """Should raise ValueError when gap exists after existing data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['TSLA']}
+        existing_metadata = {
+            'symbol': 'TSLA',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2019-01-01',
+            'end_date': '2019-12-31',  # 2019 data
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2020-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2021-01-01',  # Gap: requesting 2021 when we have 2019
+            end_date='2021-12-31'
+        )
+        
+        # Request range with gap - should raise error
+        with pytest.raises(ValueError) as exc_info:
+            downloader._plan_date_range('TSLA', '2021-01-01', '2021-12-31')
+        
+        # Verify error message is helpful
+        assert 'gap' in str(exc_info.value).lower()
+        assert '2019-01-01' in str(exc_info.value)
+        assert '2019-12-31' in str(exc_info.value)
+        assert '2021-01-01' in str(exc_info.value)
+        assert '2021-12-31' in str(exc_info.value)
+        assert 'contiguous' in str(exc_info.value).lower()
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_gap_before(self, mock_file, mock_exists):
+        """Should raise ValueError when gap exists before existing data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['NFLX']}
+        existing_metadata = {
+            'symbol': 'NFLX',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2021-01-01',  # 2021 data
+            'end_date': '2021-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2022-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2019-01-01',  # Gap: requesting 2019 when we have 2021
+            end_date='2019-12-31'
+        )
+        
+        # Request range with gap - should raise error
+        with pytest.raises(ValueError) as exc_info:
+            downloader._plan_date_range('NFLX', '2019-01-01', '2019-12-31')
+        
+        # Verify error message is helpful
+        assert 'gap' in str(exc_info.value).lower()
+        assert '2021-01-01' in str(exc_info.value)
+        assert '2021-12-31' in str(exc_info.value)
+        assert '2019-01-01' in str(exc_info.value)
+        assert '2019-12-31' in str(exc_info.value)
+        assert 'contiguous' in str(exc_info.value).lower()
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_different_interval_separate_folders(self, mock_file, mock_exists):
+        """Should download full range when interval differs (different folders)"""
+        # Setup mock - existing 1wk data
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        existing_metadata = {
+            'symbol': 'AAPL',
+            'interval': '1wk',  # Existing is weekly
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 52,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute with different interval (1d instead of 1wk)
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d'  # Requesting daily
+        )
+        
+        # Simulate no metadata in the 1d folder (only 1wk folder has data)
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            ranges = downloader._plan_date_range('AAPL', '2020-01-01', '2020-12-31')
+        
+        # Should download full range (new folder: yfinance_1d separate from yfinance_1wk)
+        assert ranges == [('2020-01-01', '2020-12-31')]
+        
+        # Verify folder paths are different
+        folder_1d = downloader._get_symbol_folder('AAPL')
+        assert str(folder_1d).endswith('yfinance_1d')
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_different_source_separate_folders(self, mock_file, mock_exists):
+        """Should download full range when source differs (different folders)"""
+        # Setup mock - existing alphavantage data
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['MSFT']}
+        existing_metadata = {
+            'symbol': 'MSFT',
+            'interval': '1d',
+            'source': 'alphavantage',  # Existing is alphavantage
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute with different source (yfinance instead of alphavantage)
+        # Note: This will fail validation since 'alphavantage' is not in VALID_SOURCES,
+        # but that's a separate concern. For this test, assume it was valid.
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            source='yfinance'  # Requesting yfinance
+        )
+        
+        # Simulate no metadata in the yfinance folder (only alphavantage folder has data)
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            ranges = downloader._plan_date_range('MSFT', '2020-01-01', '2020-12-31')
+        
+        # Should download full range (new folder: yfinance_1d separate from alphavantage_1d)
+        assert ranges == [('2020-01-01', '2020-12-31')]
+        
+        # Verify folder paths are different
+        folder_yfinance = downloader._get_symbol_folder('MSFT')
+        assert str(folder_yfinance).endswith('yfinance_1d')
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_plan_date_range_exact_match_skip(self, mock_file, mock_exists):
+        """Should return None when requested range exactly matches existing (edge case)"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AMZN']}
+        existing_metadata = {
+            'symbol': 'AMZN',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Execute
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Request exact same range
+        ranges = downloader._plan_date_range('AMZN', '2020-01-01', '2020-12-31')
+        
+        # Should skip (subset case includes exact match)
+        assert ranges is None
