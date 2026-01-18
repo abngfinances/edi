@@ -1869,3 +1869,279 @@ class TestDownloadSymbolPrices:
         assert result['downloaded'] is False
         assert result['skipped'] is True
 
+
+# ============================================================================
+# PHASE 6: Checkpoint Progress
+# ============================================================================
+
+class TestCheckpointProgress:
+    """Test checkpoint save/load functionality for resumable downloads"""
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_get_checkpoint_path(self, mock_exists, mock_file):
+        """Should return correct checkpoint file path"""
+        mock_exists.return_value = True
+        mock_file.return_value.read.return_value = json.dumps({'symbols': ['AAPL']})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        checkpoint_path = downloader._get_checkpoint_path()
+        assert str(checkpoint_path) == 'backtest_data/checkpoints/yfinance_1d_progress.json'
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_read_checkpoint_file_not_exists(self, mock_exists, mock_file):
+        """Should return empty set when checkpoint file doesn't exist"""
+        # Mock constituents file exists for initialization
+        mock_exists.return_value = True
+        mock_file.return_value.read.return_value = json.dumps({'symbols': ['AAPL']})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Now mock checkpoint file doesn't exist for _read_checkpoint call
+        mock_exists.return_value = False
+        completed = downloader._read_checkpoint()
+        assert completed == set()
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_read_checkpoint_success(self, mock_exists, mock_file):
+        """Should read and return set of completed symbols"""
+        mock_exists.return_value = True
+        
+        checkpoint_data = {
+            'index_symbol': 'SPY',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'completed_symbols': ['AAPL', 'MSFT', 'GOOGL'],
+            'last_updated': '2024-01-15T10:30:00Z'
+        }
+        
+        # Mock file reads: first for constituents, second for checkpoint
+        mock_file.return_value.read.side_effect = [
+            json.dumps({'symbols': ['AAPL', 'MSFT']}),  # constituents
+            json.dumps(checkpoint_data)  # checkpoint
+        ]
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        completed = downloader._read_checkpoint()
+        assert completed == {'AAPL', 'MSFT', 'GOOGL'}
+    
+    @patch('backtesting.price_data_source.Path.mkdir')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_write_checkpoint_creates_directory(self, mock_exists, mock_file, mock_mkdir):
+        """Should create checkpoint directory if it doesn't exist"""
+        mock_exists.return_value = True
+        mock_file.return_value.read.return_value = json.dumps({'symbols': ['AAPL']})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Mock checkpoint file not existing for the write
+        mock_exists.return_value = False
+        downloader._write_checkpoint({'AAPL', 'MSFT'})
+        
+        # Verify mkdir was called with parents=True, exist_ok=True
+        mock_mkdir.assert_called_once()
+        call_kwargs = mock_mkdir.call_args[1]
+        assert call_kwargs['parents'] is True
+        assert call_kwargs['exist_ok'] is True
+    
+    @patch('backtesting.price_data_source.Path.mkdir')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_write_checkpoint_saves_symbols(self, mock_exists, mock_file, mock_mkdir):
+        """Should save completed symbols to JSON with metadata"""
+        mock_exists.return_value = True
+        mock_file.return_value.read.return_value = json.dumps({'symbols': ['AAPL']})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Mock checkpoint file not existing for the write
+        mock_exists.return_value = False
+        completed_symbols = {'AAPL', 'MSFT', 'GOOGL'}
+        downloader._write_checkpoint(completed_symbols)
+        
+        # Verify file was opened for writing
+        write_calls = [call for call in mock_file.call_args_list if 'w' in str(call)]
+        assert len(write_calls) > 0
+        
+        # Verify JSON was written
+        handle = mock_file()
+        written_content = ''.join(call.args[0] for call in handle.write.call_args_list)
+        written_data = json.loads(written_content)
+        
+        # Verify checkpoint structure
+        assert written_data['index_symbol'] == 'SPY'
+        assert written_data['interval'] == '1d'
+        assert written_data['source'] == 'yfinance'
+        assert written_data['start_date'] == '2020-01-01'
+        assert written_data['end_date'] == '2020-12-31'
+        assert set(written_data['completed_symbols']) == completed_symbols
+        assert 'last_updated' in written_data
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_checkpoint_path_includes_source_and_interval(self, mock_exists, mock_file):
+        """Should include source and interval in checkpoint filename to avoid conflicts"""
+        mock_exists.return_value = True
+        mock_file.return_value.read.return_value = json.dumps({'symbols': ['AAPL']})
+        
+        # Test with yfinance 1d
+        downloader_1d = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        path_1d = downloader_1d._get_checkpoint_path()
+        assert 'yfinance_1d' in str(path_1d)
+        assert str(path_1d) == 'backtest_data/checkpoints/yfinance_1d_progress.json'
+        
+        # Test with yfinance 1wk
+        downloader_1wk = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1wk',
+            source='yfinance'
+        )
+        path_1wk = downloader_1wk._get_checkpoint_path()
+        assert 'yfinance_1wk' in str(path_1wk)
+        assert str(path_1wk) == 'backtest_data/checkpoints/yfinance_1wk_progress.json'
+        
+        # Verify they're different
+        assert path_1d != path_1wk
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_read_checkpoint_validates_date_range_mismatch(self, mock_exists, mock_file):
+        """Should raise error if date range doesn't match (existing download in progress)"""
+        mock_exists.return_value = True
+        
+        # Checkpoint from different date range
+        checkpoint_data = {
+            'index_symbol': 'SPY',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2021-12-31',  # Mismatch!
+            'completed_symbols': ['AAPL', 'MSFT'],
+            'last_updated': '2024-01-15T10:30:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps({'symbols': ['AAPL']}),  # constituents
+            json.dumps(checkpoint_data)  # checkpoint
+        ]
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',  # Different from checkpoint
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Should raise error with helpful message about existing download
+        with pytest.raises(ValueError) as exc_info:
+            downloader._read_checkpoint()
+        
+        error_msg = str(exc_info.value)
+        assert 'Checkpoint exists for different date range' in error_msg
+        assert 'Existing download in progress: [2020-01-01, 2021-12-31]' in error_msg
+        assert 'Current request: [2020-01-01, 2020-12-31]' in error_msg
+        assert 'complete the existing download first' in error_msg.lower()
+
+    
+    @patch('backtesting.price_data_source.Path.mkdir')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_write_checkpoint_merges_with_existing(self, mock_exists, mock_file, mock_mkdir):
+        """Should merge new symbols with existing checkpoint data"""
+        mock_exists.return_value = True
+        
+        # Existing checkpoint has AAPL and MSFT
+        existing_checkpoint = {
+            'index_symbol': 'SPY',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'completed_symbols': ['AAPL', 'MSFT'],
+            'last_updated': '2024-01-15T10:30:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps({'symbols': ['AAPL', 'MSFT', 'GOOGL', 'TSLA']}),  # constituents
+            json.dumps(existing_checkpoint),  # checkpoint for read during write
+        ]
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Write checkpoint with GOOGL and TSLA (new symbols)
+        downloader._write_checkpoint({'GOOGL', 'TSLA'})
+        
+        # Verify file was opened for writing
+        write_calls = [call for call in mock_file.call_args_list if 'w' in str(call)]
+        assert len(write_calls) > 0
+        
+        # Verify JSON was written with merged symbols
+        handle = mock_file()
+        written_content = ''.join(call.args[0] for call in handle.write.call_args_list)
+        written_data = json.loads(written_content)
+        
+        # Should contain all 4 symbols (merged)
+        assert set(written_data['completed_symbols']) == {'AAPL', 'MSFT', 'GOOGL', 'TSLA'}
+

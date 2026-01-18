@@ -432,6 +432,99 @@ class PriceDownloader:
         """
         return self._get_symbol_folder(symbol) / 'prices.parquet'
     
+    def _get_checkpoint_path(self) -> Path:
+        """
+        Get checkpoint file path for tracking download progress.
+        
+        Checkpoint files are namespaced by source and interval to avoid conflicts
+        when downloading multiple configurations (e.g., yfinance_1d vs yfinance_1wk).
+        
+        Returns:
+            Path to {source}_{interval}_progress.json checkpoint file
+        """
+        checkpoint_filename = f"{self.source}_{self.interval}_progress.json"
+        return self.output_dir / 'checkpoints' / checkpoint_filename
+    
+    def _read_checkpoint(self) -> Set[str]:
+        """
+        Read checkpoint file to get list of completed symbols.
+        
+        Validates that checkpoint metadata matches current downloader configuration
+        (source, interval, date range) to avoid using stale or mismatched checkpoints.
+        
+        Returns:
+            Set of symbols that have been successfully downloaded
+        """
+        checkpoint_path = self._get_checkpoint_path()
+        
+        if not checkpoint_path.exists():
+            logger.debug("No checkpoint file found, starting fresh")
+            return set()
+        
+        try:
+            with open(checkpoint_path, 'r') as f:
+                data = json.load(f)
+            
+            # Validate date range matches (source/interval already enforced by filename namespace)
+            if data.get('start_date') != self.start_date or data.get('end_date') != self.end_date:
+                raise ValueError(
+                    f"Checkpoint exists for different date range. "
+                    f"Existing download in progress: [{data.get('start_date')}, {data.get('end_date')}]. "
+                    f"Current request: [{self.start_date}, {self.end_date}]. "
+                    f"Please complete the existing download first by running with dates "
+                    f"[{data.get('start_date')}, {data.get('end_date')}], or delete the checkpoint file: {checkpoint_path}"
+                )
+            
+            completed_symbols = data.get('completed_symbols', [])
+            logger.info(f"Loaded checkpoint: {len(completed_symbols)} symbols already completed")
+            return set(completed_symbols)
+            
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to read checkpoint file: {e}. Starting fresh.")
+            return set()
+    
+    def _write_checkpoint(self, completed_symbols: Set[str]) -> None:
+        """
+        Write checkpoint file with list of completed symbols.
+        
+        Merges with existing checkpoint data to preserve progress across multiple calls.
+        
+        Args:
+            completed_symbols: Set of symbols that have been successfully downloaded
+        """
+        checkpoint_path = self._get_checkpoint_path()
+        
+        # Read existing checkpoint and merge with new symbols
+        existing_completed = self._read_checkpoint()
+        merged_symbols = existing_completed | completed_symbols
+        
+        # Create checkpoint directory if it doesn't exist
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build checkpoint data
+        checkpoint_data = {
+            'index_symbol': self.index_symbol,
+            'interval': self.interval,
+            'source': self.source,
+            'start_date': self.start_date,
+            'end_date': self.end_date,
+            'completed_symbols': sorted(list(merged_symbols)),  # Sort for deterministic output
+            'last_updated': datetime.utcnow().isoformat() + 'Z'
+        }
+        
+        # Write checkpoint file
+        try:
+            with open(checkpoint_path, 'w') as f:
+                json.dump(checkpoint_data, f, indent=2)
+            
+            new_count = len(completed_symbols)
+            total_count = len(merged_symbols)
+            logger.debug(f"Checkpoint saved: {new_count} new symbols, {total_count} total completed")
+            
+        except IOError as e:
+            logger.error(f"Failed to write checkpoint file: {e}")
+            raise ValueError(f"Failed to write checkpoint: {e}") from e
+    
     def _read_metadata(self, symbol: str) -> Optional[Dict]:
         """
         Read existing metadata for a symbol.
