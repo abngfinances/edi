@@ -1383,3 +1383,489 @@ class TestDateRangePlanning:
         
         # Should skip (subset case includes exact match)
         assert ranges is None
+
+
+# ============================================================================
+# PHASE 5: Download & Merge Single Symbol Tests
+# ============================================================================
+
+class TestDownloadSymbolPrices:
+    """Test downloading and merging price data for a single symbol"""
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_no_existing_data(self, mock_file, mock_exists):
+        """Should download full range and write new files when no existing data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create downloader
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-01-10'
+        )
+        
+        # Mock data source to return price data
+        mock_prices = pd.DataFrame({
+            'Open': [100.0, 101.0, 102.0],
+            'High': [105.0, 106.0, 107.0],
+            'Low': [99.0, 100.0, 101.0],
+            'Close': [104.0, 105.0, 106.0],
+            'Volume': [1000000, 1100000, 1200000]
+        }, index=pd.date_range('2020-01-02', periods=3, freq='D'))
+        
+        downloader.data_source.download_symbol = Mock(return_value={
+            'prices': mock_prices,
+            'splits': pd.Series([], dtype=float),
+            'dividends': pd.Series([], dtype=float)
+        })
+        
+        # Mock file operations
+        with patch('backtesting.price_data_source.Path.mkdir'), \
+             patch('backtesting.price_data_source.Path.exists', return_value=False), \
+             patch.object(downloader, '_write_metadata') as mock_write_metadata, \
+             patch('pandas.DataFrame.to_parquet') as mock_to_parquet:
+            
+            # Execute
+            result = downloader.download_symbol_prices('AAPL')
+        
+        # Verify download was called
+        downloader.data_source.download_symbol.assert_called_once_with('AAPL', '2020-01-01', '2020-01-10')
+        
+        # Verify metadata was written
+        mock_write_metadata.assert_called_once()
+        call_args = mock_write_metadata.call_args[1]
+        assert call_args['symbol'] == 'AAPL'
+        assert call_args['start_date'] == '2020-01-02'  # First price date
+        assert call_args['end_date'] == '2020-01-04'    # Last price date
+        assert call_args['total_days'] == 3
+        
+        # Verify prices were written
+        mock_to_parquet.assert_called_once()
+        
+        # Verify result
+        assert result == {'symbol': 'AAPL', 'downloaded': True, 'skipped': False}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_skip_when_exists(self, mock_file, mock_exists):
+        """Should skip download when data already exists (subset case)"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['MSFT']}
+        existing_metadata = {
+            'symbol': 'MSFT',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Create downloader requesting subset of existing range
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-06-01',  # Subset
+            end_date='2020-09-30'
+        )
+        
+        # Execute
+        result = downloader.download_symbol_prices('MSFT')
+        
+        # Verify no download occurred
+        assert result == {'symbol': 'MSFT', 'downloaded': False, 'skipped': True}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('pandas.read_parquet')
+    def test_download_symbol_prices_extend_after(self, mock_read_parquet, mock_file, mock_exists):
+        """Should download only new dates and merge with existing data"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['GOOGL']}
+        existing_metadata = {
+            'symbol': 'GOOGL',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-02',
+            'end_date': '2020-01-10',
+            'total_days': 7,
+            'splits': {},
+            'dividends': {'2020-01-05': 0.50},
+            'last_updated': '2020-01-11T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata),  # For _plan_date_range
+            json.dumps(existing_metadata)   # For download_symbol_prices (loading existing metadata)
+        ]
+        
+        # Mock existing price data
+        existing_prices = pd.DataFrame({
+            'Open': [100.0, 101.0],
+            'High': [105.0, 106.0],
+            'Low': [99.0, 100.0],
+            'Close': [104.0, 105.0],
+            'Volume': [1000000, 1100000]
+        }, index=pd.date_range('2020-01-02', periods=2, freq='D'))
+        mock_read_parquet.return_value = existing_prices
+        
+        # Create downloader extending after existing range
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-02',  # Same as existing start (not before)
+            end_date='2020-01-15'      # Extends after
+        )
+        
+        # Mock new price data (2020-01-11 to 2020-01-15)
+        new_prices = pd.DataFrame({
+            'Open': [106.0, 107.0],
+            'High': [108.0, 109.0],
+            'Low': [105.0, 106.0],
+            'Close': [107.0, 108.0],
+            'Volume': [1200000, 1300000]
+        }, index=pd.date_range('2020-01-13', periods=2, freq='D'))
+        
+        downloader.data_source.download_symbol = Mock(return_value={
+            'prices': new_prices,
+            'splits': pd.Series([], dtype=float),
+            'dividends': pd.Series([0.55], index=pd.to_datetime(['2020-01-14']))
+        })
+        
+        # Mock file operations
+        with patch('backtesting.price_data_source.Path.mkdir'), \
+             patch.object(downloader, '_write_metadata') as mock_write_metadata, \
+             patch('pandas.DataFrame.to_parquet') as mock_to_parquet:
+            
+            # Execute
+            result = downloader.download_symbol_prices('GOOGL')
+        
+        # Verify download called with only new range
+        downloader.data_source.download_symbol.assert_called_once_with('GOOGL', '2020-01-11', '2020-01-15')
+        
+        # Verify metadata updated with extended range
+        mock_write_metadata.assert_called_once()
+        call_args = mock_write_metadata.call_args[1]
+        assert call_args['symbol'] == 'GOOGL'
+        assert call_args['start_date'] == '2020-01-02'  # Unchanged from existing
+        assert call_args['end_date'] == '2020-01-14'    # Extended to last new price
+        assert call_args['total_days'] == 4  # 2 existing + 2 new
+        # Verify dividends merged
+        assert call_args['dividends'] == {'2020-01-05': 0.50, '2020-01-14': 0.55}
+        
+        # Verify merged prices written
+        mock_to_parquet.assert_called_once()
+        # to_parquet is called as df.to_parquet(path), so mock is on the DataFrame method
+        # The path is the first argument
+        written_path = mock_to_parquet.call_args[0][0]
+        assert 'prices.parquet' in str(written_path)
+        
+        # Verify result
+        assert result == {'symbol': 'GOOGL', 'downloaded': True, 'skipped': False}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('pandas.read_parquet')
+    def test_download_symbol_prices_extend_both_sides(self, mock_read_parquet, mock_file, mock_exists):
+        """Should download two ranges and merge when extending both before and after"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AMZN']}
+        existing_metadata = {
+            'symbol': 'AMZN',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-06-01',
+            'end_date': '2020-08-31',
+            'total_days': 92,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2020-09-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata),  # For _plan_date_range
+            json.dumps(existing_metadata)   # For download_symbol_prices (loading existing metadata)
+        ]
+        
+        # Mock existing price data
+        existing_prices = pd.DataFrame({
+            'Open': [100.0, 101.0],
+            'High': [105.0, 106.0],
+            'Low': [99.0, 100.0],
+            'Close': [104.0, 105.0],
+            'Volume': [1000000, 1100000]
+        }, index=pd.date_range('2020-06-01', periods=2, freq='D'))
+        mock_read_parquet.return_value = existing_prices
+        
+        # Create downloader extending both sides
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Mock data source to return data for both ranges
+        call_count = [0]
+        def download_side_effect(symbol, start, end):
+            call_count[0] += 1
+            if call_count[0] == 1:  # Before range
+                return {
+                    'prices': pd.DataFrame({
+                        'Open': [90.0], 'High': [95.0], 'Low': [89.0],
+                        'Close': [94.0], 'Volume': [900000]
+                    }, index=pd.date_range('2020-05-29', periods=1, freq='D')),
+                    'splits': pd.Series([], dtype=float),
+                    'dividends': pd.Series([], dtype=float)
+                }
+            else:  # After range
+                return {
+                    'prices': pd.DataFrame({
+                        'Open': [110.0], 'High': [115.0], 'Low': [109.0],
+                        'Close': [114.0], 'Volume': [1300000]
+                    }, index=pd.date_range('2020-09-01', periods=1, freq='D')),
+                    'splits': pd.Series([], dtype=float),
+                    'dividends': pd.Series([], dtype=float)
+                }
+        
+        downloader.data_source.download_symbol = Mock(side_effect=download_side_effect)
+        
+        # Mock file operations
+        with patch('backtesting.price_data_source.Path.mkdir'), \
+             patch.object(downloader, '_write_metadata') as mock_write_metadata, \
+             patch('pandas.DataFrame.to_parquet') as mock_to_parquet:
+            
+            # Execute
+            result = downloader.download_symbol_prices('AMZN')
+        
+        # Verify two downloads occurred
+        assert downloader.data_source.download_symbol.call_count == 2
+        
+        # Verify metadata updated with full range
+        mock_write_metadata.assert_called_once()
+        call_args = mock_write_metadata.call_args[1]
+        assert call_args['start_date'] == '2020-05-29'
+        assert call_args['end_date'] == '2020-09-01'
+        assert call_args['total_days'] == 4  # 1 before + 2 existing + 1 after
+        
+        # Verify result
+        assert result == {'symbol': 'AMZN', 'downloaded': True, 'skipped': False}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_handles_download_failure(self, mock_file, mock_exists):
+        """Should raise ValueError when download fails"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['INVALID']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create downloader
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-01-10'
+        )
+        
+        # Mock data source to raise error
+        downloader.data_source.download_symbol = Mock(side_effect=ValueError("Symbol not found"))
+        
+        # Execute and verify error
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            with pytest.raises(ValueError) as exc_info:
+                downloader.download_symbol_prices('INVALID')
+        
+        assert 'symbol not found' in str(exc_info.value).lower()
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('pandas.read_parquet')
+    def test_download_symbol_prices_merges_splits_data(self, mock_read_parquet, mock_file, mock_exists):
+        """Should correctly merge splits data from existing and new downloads"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['TSLA']}
+        existing_metadata = {
+            'symbol': 'TSLA',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-06-30',
+            'total_days': 126,
+            'splits': {'2020-03-15': 2.0},  # Existing split
+            'dividends': {},
+            'last_updated': '2020-07-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata),  # For _plan_date_range
+            json.dumps(existing_metadata)   # For download_symbol_prices (loading existing metadata)
+        ]
+        
+        # Mock existing prices
+        existing_prices = pd.DataFrame({
+            'Open': [100.0], 'High': [105.0], 'Low': [99.0],
+            'Close': [104.0], 'Volume': [1000000]
+        }, index=pd.date_range('2020-01-02', periods=1, freq='D'))
+        mock_read_parquet.return_value = existing_prices
+        
+        # Create downloader
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Mock new data with new split
+        new_prices = pd.DataFrame({
+            'Open': [200.0], 'High': [205.0], 'Low': [199.0],
+            'Close': [204.0], 'Volume': [2000000]
+        }, index=pd.date_range('2020-07-01', periods=1, freq='D'))
+        
+        downloader.data_source.download_symbol = Mock(return_value={
+            'prices': new_prices,
+            'splits': pd.Series([4.0], index=pd.to_datetime(['2020-08-31'])),  # New split
+            'dividends': pd.Series([], dtype=float)
+        })
+        
+        # Mock file operations
+        with patch('backtesting.price_data_source.Path.mkdir'), \
+             patch.object(downloader, '_write_metadata') as mock_write_metadata, \
+             patch('pandas.DataFrame.to_parquet'):
+            
+            # Execute
+            downloader.download_symbol_prices('TSLA')
+        
+        # Verify splits were merged correctly
+        call_args = mock_write_metadata.call_args[1]
+        assert call_args['splits'] == {'2020-03-15': 2.0, '2020-08-31': 4.0}
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_validates_symbol_in_constituents(self, mock_file, mock_exists):
+        """Should raise ValueError if symbol not in constituents"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL', 'MSFT']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create downloader
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+        
+        # Execute with symbol not in constituents
+        with pytest.raises(ValueError) as exc_info:
+            downloader.download_symbol_prices('GOOGL')  # Not in constituents
+        
+        assert 'not in constituents' in str(exc_info.value).lower()
+        assert 'GOOGL' in str(exc_info.value)
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_empty_dataframe_raises_error(self, mock_file, mock_exists):
+        """Should raise ValueError if download returns empty DataFrame"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create downloader
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-01-10'
+        )
+        
+        # Mock data source to return empty DataFrame
+        downloader.data_source.download_symbol = Mock(return_value={
+            'prices': pd.DataFrame(),  # Empty
+            'splits': pd.Series([], dtype=float),
+            'dividends': pd.Series([], dtype=float)
+        })
+        
+        # Execute and verify error
+        with patch('backtesting.price_data_source.Path.exists', return_value=False):
+            with pytest.raises(ValueError) as exc_info:
+                downloader.download_symbol_prices('AAPL')
+        
+        assert 'no price data' in str(exc_info.value).lower()
+        assert 'AAPL' in str(exc_info.value)
+    
+    @patch('backtesting.price_data_source.Path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_download_symbol_prices_returns_dict_with_status(self, mock_file, mock_exists):
+        """Should return dict with symbol, downloaded, and skipped status"""
+        # Setup mock
+        mock_exists.return_value = True
+        constituents_data = {'symbols': ['AAPL']}
+        existing_metadata = {
+            'symbol': 'AAPL',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'total_days': 252,
+            'splits': {},
+            'dividends': {},
+            'last_updated': '2021-01-01T00:00:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps(constituents_data),
+            json.dumps(existing_metadata)
+        ]
+        
+        # Create downloader (subset case - will skip)
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-06-01',
+            end_date='2020-09-30'
+        )
+        
+        # Execute
+        result = downloader.download_symbol_prices('AAPL')
+        
+        # Verify return format
+        assert isinstance(result, dict)
+        assert 'symbol' in result
+        assert 'downloaded' in result
+        assert 'skipped' in result
+        assert result['symbol'] == 'AAPL'
+        assert result['downloaded'] is False
+        assert result['skipped'] is True
+

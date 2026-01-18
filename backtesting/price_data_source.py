@@ -634,4 +634,204 @@ class PriceDownloader:
             f"Requested: [{start}, {end}]. "
             f"Please report this as a bug."
         )
+    
+    def _verify_no_overlap_and_merge(self, symbol: str, 
+                                     new_data: Dict[str, float],
+                                     existing_data: Dict[str, float],
+                                     data_type: str) -> Dict[str, float]:
+        """
+        Verify no overlap between new and existing data, then merge.
+        
+        Following EDI pattern: Error out rather than auto-compensate.
+        If overlap exists, it indicates a bug in date range planning.
+        
+        Args:
+            symbol: Stock symbol (for error messages)
+            new_data: Newly downloaded data {date_str: value}
+            existing_data: Existing data from metadata {date_str: value}
+            data_type: 'split' or 'dividend' (for error messages)
+            
+        Returns:
+            Merged dictionary (simple dict merge since no overlap verified)
+            
+        Raises:
+            ValueError: If any overlap detected between new and existing data
+        """
+        # Check for overlap
+        overlapping_dates = set(new_data.keys()) & set(existing_data.keys())
+        if overlapping_dates:
+            raise ValueError(
+                f"{symbol}: {data_type.capitalize()} overlap detected on {len(overlapping_dates)} date(s). "
+                f"First overlap: {sorted(overlapping_dates)[0]}. "
+                f"Bug in date range planning - new downloads should not overlap with existing data."
+            )
+        
+        # No overlap - safe to merge
+        return {**existing_data, **new_data}
+    
+    def download_symbol_prices(self, symbol: str) -> Dict:
+        """
+        Download and merge price data for a single symbol.
+        
+        This method:
+        1. Validates symbol is in constituents
+        2. Plans date ranges to download using _plan_date_range()
+        3. Downloads data for each range
+        4. Merges with existing data (prices, splits, dividends)
+        5. Writes updated files (prices.parquet, metadata.json)
+        
+        Args:
+            symbol: Stock symbol to download
+            
+        Returns:
+            Dict with keys:
+                - symbol: The symbol processed
+                - downloaded: True if data was downloaded, False if skipped
+                - skipped: True if download was skipped (data already exists)
+                
+        Raises:
+            ValueError: If symbol not in constituents, download fails, or data is empty
+        """
+        # Validate symbol in constituents
+        if symbol not in self.constituents:
+            raise ValueError(
+                f"Symbol {symbol} not in constituents. "
+                f"Available symbols: {len(self.constituents)} total"
+            )
+        
+        # Plan date ranges to download
+        ranges_to_download = self._plan_date_range(symbol, self.start_date, self.end_date)
+        
+        # Skip if no download needed
+        if ranges_to_download is None:
+            logger.debug(f"{symbol}: Skipping download (data already exists)")
+            return {'symbol': symbol, 'downloaded': False, 'skipped': True}
+        
+        logger.info(f"{symbol}: Downloading {len(ranges_to_download)} range(s)")
+        
+        # Download and collect each range
+        all_prices = []
+        all_splits = {}
+        all_dividends = {}
+        
+        for start, end in ranges_to_download:
+            logger.debug(f"{symbol}: Downloading range [{start}, {end}]")
+            
+            # Download data
+            try:
+                result = self.data_source.download_symbol(symbol, start, end)
+            except Exception as e:
+                raise ValueError(f"Failed to download {symbol}: {e}") from e
+            
+            # Validate data
+            if result['prices'].empty or len(result['prices']) == 0:
+                raise ValueError(f"No price data returned for {symbol} in range [{start}, {end}]")
+            
+            # Collect prices
+            all_prices.append(result['prices'])
+            
+            # Collect splits - use helper to verify no overlap and merge
+            if len(result['splits']) > 0:
+                range_splits = {date.strftime('%Y-%m-%d'): ratio 
+                               for date, ratio in result['splits'].items()}
+                all_splits = self._verify_no_overlap_and_merge(
+                    symbol=symbol,
+                    new_data=range_splits,
+                    existing_data=all_splits,
+                    data_type='split'
+                )
+            
+            # Collect dividends - use helper to verify no overlap and merge
+            if len(result['dividends']) > 0:
+                range_dividends = {date.strftime('%Y-%m-%d'): amount 
+                                  for date, amount in result['dividends'].items()}
+                all_dividends = self._verify_no_overlap_and_merge(
+                    symbol=symbol,
+                    new_data=range_dividends,
+                    existing_data=all_dividends,
+                    data_type='dividend'
+                )
+        
+        # === Process downloaded data ===
+        
+        # Combine new prices and check for duplicates within downloaded data
+        if len(all_prices) > 1:
+            # Multiple ranges downloaded - verify no overlap
+            combined_new_prices = pd.concat(all_prices, axis=0).sort_index()
+            if combined_new_prices.index.duplicated().any():
+                duplicate_dates = combined_new_prices.index[combined_new_prices.index.duplicated()].unique()
+                raise ValueError(
+                    f"{symbol}: Downloaded ranges contain overlapping dates. "
+                    f"First duplicate: {duplicate_dates[0]}. "
+                    f"Bug in date range planning - ranges should not overlap."
+                )
+        else:
+            combined_new_prices = all_prices[0]
+        
+        # === Merge with existing data ===
+        
+        # Load existing data if it exists and verify no overlap
+        prices_path = self._get_prices_path(symbol)
+        if prices_path.exists():
+            logger.debug(f"{symbol}: Loading existing data from {prices_path}")
+            existing_prices = pd.read_parquet(prices_path)
+            existing_metadata = self._read_metadata(symbol)
+            
+            # Verify no overlap between new and existing prices
+            overlapping_dates = combined_new_prices.index.intersection(existing_prices.index)
+            if len(overlapping_dates) > 0:
+                raise ValueError(
+                    f"{symbol}: Downloaded data overlaps with existing data on {len(overlapping_dates)} date(s). "
+                    f"First overlap: {overlapping_dates[0]}. "
+                    f"Bug in date range planning - new downloads should not overlap with existing data."
+                )
+            
+            # Combine prices (no overlap, so simple concatenation)
+            combined_prices = pd.concat([existing_prices, combined_new_prices], axis=0).sort_index()
+            
+            # Merge splits/dividends using helper (verifies no overlap)
+            if existing_metadata:
+                all_splits = self._verify_no_overlap_and_merge(
+                    symbol=symbol,
+                    new_data=all_splits,
+                    existing_data=existing_metadata.get('splits', {}),
+                    data_type='split'
+                )
+                
+                all_dividends = self._verify_no_overlap_and_merge(
+                    symbol=symbol,
+                    new_data=all_dividends,
+                    existing_data=existing_metadata.get('dividends', {}),
+                    data_type='dividend'
+                )
+        else:
+            # No existing data - use new data directly
+            combined_prices = combined_new_prices
+        
+        # === Write final data ===
+        
+        # Calculate metadata
+        start_date = combined_prices.index.min().strftime('%Y-%m-%d')
+        end_date = combined_prices.index.max().strftime('%Y-%m-%d')
+        total_days = len(combined_prices)
+        
+        # Write prices to parquet
+        prices_path.parent.mkdir(parents=True, exist_ok=True)
+        combined_prices.to_parquet(prices_path)
+        logger.debug(f"{symbol}: Wrote {total_days} days of prices to {prices_path}")
+        
+        # Write metadata
+        self._write_metadata(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            total_days=total_days,
+            splits=all_splits,
+            dividends=all_dividends
+        )
+        
+        logger.info(f"{symbol}: Successfully downloaded and saved {total_days} days "
+                   f"[{start_date}, {end_date}]")
+        
+        return {'symbol': symbol, 'downloaded': True, 'skipped': False}
 
