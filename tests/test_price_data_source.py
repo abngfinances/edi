@@ -2145,3 +2145,615 @@ class TestCheckpointProgress:
         # Should contain all 4 symbols (merged)
         assert set(written_data['completed_symbols']) == {'AAPL', 'MSFT', 'GOOGL', 'TSLA'}
 
+
+class TestBatchOrchestration:
+    """Test batch orchestration (download all symbols with checkpointing)"""
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_no_checkpoint_fresh_start(self, mock_exists, mock_file):
+        """Should download all symbols in batches when no checkpoint exists"""
+        # No checkpoint exists
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # Constituents file has 5 symbols
+        mock_file.return_value.read.return_value = json.dumps({
+            'symbols': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']
+        })
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance',
+            batch_size=2
+        )
+        
+        # Mock download_symbol_prices to simulate success
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            mock_download.return_value = {'symbol': 'AAPL', 'downloaded': True, 'skipped': False}
+            
+            # Mock _write_checkpoint and _read_checkpoint
+            with patch.object(downloader, '_write_checkpoint') as mock_write_checkpoint:
+                with patch.object(downloader, '_read_checkpoint', return_value=set()) as mock_read_checkpoint:
+                    result = downloader.download_all()
+        
+        # Should have downloaded all 5 symbols
+        assert mock_download.call_count == 5
+        symbols_downloaded = [call.args[0] for call in mock_download.call_args_list]
+        assert set(symbols_downloaded) == {'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'}
+        
+        # Should have written checkpoint after each batch (3 batches: 2+2+1)
+        assert mock_write_checkpoint.call_count == 3
+        
+        # Result should show all completed
+        assert result['completed'] == 5
+        assert result['failed'] == 0
+        assert result['skipped'] == 0
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_with_checkpoint_resume(self, mock_exists, mock_file):
+        """Should skip already completed symbols from checkpoint"""
+        mock_exists.return_value = True
+        
+        # Checkpoint shows AAPL and MSFT already completed
+        existing_checkpoint = {
+            'index_symbol': 'SPY',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'completed_symbols': ['AAPL', 'MSFT'],
+            'last_updated': '2024-01-15T10:30:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps({'symbols': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']}),  # constituents
+            json.dumps(existing_checkpoint),  # checkpoint
+        ]
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance',
+            batch_size=2
+        )
+        
+        # Mock download_symbol_prices
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            mock_download.return_value = {'symbol': 'GOOGL', 'downloaded': True, 'skipped': False}
+            
+            # Mock _read_checkpoint to return completed symbols
+            with patch.object(downloader, '_read_checkpoint', return_value={'AAPL', 'MSFT'}) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_write_checkpoint:
+                    result = downloader.download_all()
+        
+        # Should only download 3 symbols (GOOGL, TSLA, AMZN)
+        assert mock_download.call_count == 3
+        symbols_downloaded = [call.args[0] for call in mock_download.call_args_list]
+        assert set(symbols_downloaded) == {'GOOGL', 'TSLA', 'AMZN'}
+        
+        # Result should show 3 completed, 2 skipped
+        assert result['completed'] == 3
+        assert result['failed'] == 0
+        assert result['skipped'] == 2
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_partial_batch_failure(self, mock_exists, mock_file):
+        """Should continue with next batch when some symbols fail"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        mock_file.return_value.read.return_value = json.dumps({
+            'symbols': ['AAPL', 'MSFT', 'GOOGL', 'TSLA']
+        })
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance',
+            batch_size=2
+        )
+        
+        # Mock download_symbol_prices - MSFT fails, others succeed
+        def download_side_effect(symbol):
+            if symbol == 'MSFT':
+                return {'symbol': symbol, 'downloaded': False, 'skipped': False}
+            return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        
+        with patch.object(downloader, 'download_symbol_prices', side_effect=download_side_effect):
+            with patch.object(downloader, '_read_checkpoint', return_value=set()) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_write_checkpoint:
+                    result = downloader.download_all()
+        
+        # Should have tried all 4 symbols
+        assert result['completed'] == 3
+        assert result['failed'] == 1
+        assert result['skipped'] == 0
+        
+        # Checkpoint should be written after each batch (2 batches)
+        assert mock_write_checkpoint.call_count == 2
+        
+        # Each checkpoint write should only contain successfully completed symbols
+        first_batch_symbols = mock_write_checkpoint.call_args_list[0].args[0]
+        assert 'AAPL' in first_batch_symbols
+        assert 'MSFT' not in first_batch_symbols  # Failed, should not be in checkpoint
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_already_completed(self, mock_exists, mock_file):
+        """Should skip all symbols when all are in checkpoint"""
+        mock_exists.return_value = True
+        
+        # All symbols already in checkpoint
+        existing_checkpoint = {
+            'index_symbol': 'SPY',
+            'interval': '1d',
+            'source': 'yfinance',
+            'start_date': '2020-01-01',
+            'end_date': '2020-12-31',
+            'completed_symbols': ['AAPL', 'MSFT', 'GOOGL'],
+            'last_updated': '2024-01-15T10:30:00Z'
+        }
+        
+        mock_file.return_value.read.side_effect = [
+            json.dumps({'symbols': ['AAPL', 'MSFT', 'GOOGL']}),  # constituents
+            json.dumps(existing_checkpoint),  # checkpoint
+        ]
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance'
+        )
+        
+        # Mock download_symbol_prices (should not be called)
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            # Mock _read_checkpoint to return all symbols as completed
+            with patch.object(downloader, '_read_checkpoint', return_value={'AAPL', 'MSFT', 'GOOGL'}) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_write_checkpoint:
+                    result = downloader.download_all()
+        
+        # Should not download anything
+        assert mock_download.call_count == 0
+        
+        # Should not write checkpoint (nothing changed)
+        assert mock_write_checkpoint.call_count == 0
+        
+        # Result should show all skipped
+        assert result['completed'] == 0
+        assert result['failed'] == 0
+        assert result['skipped'] == 3
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_checkpoint_updated_after_each_batch(self, mock_exists, mock_file):
+        """Should update checkpoint after each batch completes"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        mock_file.return_value.read.return_value = json.dumps({
+            'symbols': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']
+        })
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            interval='1d',
+            source='yfinance',
+            batch_size=2
+        )
+        
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            mock_download.return_value = {'symbol': 'AAPL', 'downloaded': True, 'skipped': False}
+            
+            with patch.object(downloader, '_read_checkpoint', return_value=set()) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_write_checkpoint:
+                    result = downloader.download_all()
+        
+        # Should write checkpoint 3 times (3 batches: 2+2+1)
+        assert mock_write_checkpoint.call_count == 3
+        
+        # Checkpoint accumulates: first batch has 2 symbols
+        first_call_symbols = mock_write_checkpoint.call_args_list[0].args[0]
+        assert len(first_call_symbols) == 2
+        
+        # Second batch accumulates: 2 + 2 = 4 total symbols
+        second_call_symbols = mock_write_checkpoint.call_args_list[1].args[0]
+        assert len(second_call_symbols) == 4
+        
+        # Third batch accumulates: 4 + 1 = 5 total symbols
+        third_call_symbols = mock_write_checkpoint.call_args_list[2].args[0]
+        assert len(third_call_symbols) == 5
+    
+    @patch('concurrent.futures.ThreadPoolExecutor')
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_uses_correct_max_workers(self, mock_exists, mock_file, mock_executor_class):
+        """Should use configured max_workers when creating thread pool"""
+        # Setup mocks
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        mock_file.return_value.read.return_value = json.dumps({
+            'symbols': ['AAPL', 'MSFT', 'GOOGL']
+        })
+        
+        # Mock executor - create a real Future to avoid as_completed issues
+        from concurrent.futures import Future
+        from threading import Event
+        
+        mock_executor = Mock()
+        
+        def create_completed_future(result):
+            """Create a Future that is already completed with a result"""
+            future = Future()
+            future.set_result(result)
+            return future
+        
+        # submit() returns completed futures
+        mock_executor.submit.side_effect = lambda func, symbol: create_completed_future(
+            {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        )
+        mock_executor.__enter__ = Mock(return_value=mock_executor)
+        mock_executor.__exit__ = Mock(return_value=False)
+        mock_executor_class.return_value = mock_executor
+        
+        # Create downloader with specific max_workers
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            max_workers=10,  # Custom value
+            batch_size=3
+        )
+        
+        # Mock _read_checkpoint to avoid file operations
+        with patch.object(downloader, '_read_checkpoint', return_value=set()):
+            # Mock download_symbol_prices to avoid actual downloads
+            with patch.object(downloader, 'download_symbol_prices') as mock_download:
+                mock_download.return_value = {'symbol': 'AAPL', 'downloaded': True, 'skipped': False}
+                with patch.object(downloader, '_write_checkpoint'):
+                    downloader.download_all()
+        
+        # Verify ThreadPoolExecutor was created with correct max_workers
+        # Should have been called once (one batch of 3 symbols)
+        mock_executor_class.assert_called_once_with(max_workers=10)
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_batch_size_controls_checkpoint_frequency(self, mock_exists, mock_file):
+        """Should write checkpoint after each batch based on batch_size"""
+        # Setup mocks
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 7 symbols with batch_size=3 should create 3 batches: 3+3+1
+        mock_file.return_value.read.return_value = json.dumps({
+            'symbols': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META']
+        })
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            batch_size=3  # Process 3 symbols per batch
+        )
+        
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            mock_download.return_value = {'symbol': 'AAPL', 'downloaded': True, 'skipped': False}
+            
+            with patch.object(downloader, '_read_checkpoint', return_value=set()) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_checkpoint:
+                    downloader.download_all()
+        
+        # Should write checkpoint 3 times (after each batch)
+        assert mock_checkpoint.call_count == 3
+        
+        # Verify checkpoint accumulates: first batch has 3 symbols
+        first_batch_symbols = mock_checkpoint.call_args_list[0].args[0]
+        assert len(first_batch_symbols) == 3
+        
+        # Second batch accumulates: 3 + 3 = 6 total symbols
+        second_batch_symbols = mock_checkpoint.call_args_list[1].args[0]
+        assert len(second_batch_symbols) == 6
+        
+        # Third batch accumulates: 6 + 1 = 7 total symbols
+        third_batch_symbols = mock_checkpoint.call_args_list[2].args[0]
+        assert len(third_batch_symbols) == 7
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_default_batch_size(self, mock_exists, mock_file):
+        """Should use default batch_size of 10 when not specified"""
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 25 symbols with default batch_size=10 should create 3 batches: 10+10+5
+        symbols = [f'SYM{i:02d}' for i in range(25)]
+        mock_file.return_value.read.return_value = json.dumps({'symbols': symbols})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+            # No batch_size specified - should default to 10
+        )
+        
+        with patch.object(downloader, 'download_symbol_prices') as mock_download:
+            mock_download.return_value = {'symbol': 'SYM00', 'downloaded': True, 'skipped': False}
+            
+            with patch.object(downloader, '_read_checkpoint', return_value=set()) as mock_read_checkpoint:
+                with patch.object(downloader, '_write_checkpoint') as mock_checkpoint:
+                    downloader.download_all()
+        
+        # Should write checkpoint 3 times (3 batches)
+        assert mock_checkpoint.call_count == 3
+        
+        # Verify checkpoint accumulates: 10, then 20, then 25 total symbols
+        batch_sizes = [len(call.args[0]) for call in mock_checkpoint.call_args_list]
+        assert batch_sizes == [10, 20, 25]  # Accumulates: 10, then +10=20, then +5=25
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_handles_partial_final_batch(self, mock_exists, mock_file):
+        """Should download all symbols when total count doesn't divide evenly by batch_size"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 7 symbols with batch_size=3 creates partial final batch (3+3+1)
+        symbols = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN', 'NVDA', 'META']
+        mock_file.return_value.read.return_value = json.dumps({'symbols': symbols})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            batch_size=3
+        )
+        
+        # Track which symbols were downloaded
+        downloaded_symbols = []
+        def download_side_effect(symbol):
+            downloaded_symbols.append(symbol)
+            return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        
+        with patch.object(downloader, 'download_symbol_prices', side_effect=download_side_effect):
+            with patch.object(downloader, '_read_checkpoint', return_value=set()):
+                with patch.object(downloader, '_write_checkpoint') as mock_checkpoint:
+                    result = downloader.download_all()
+        
+        # Verify ALL 7 symbols downloaded (no symbols skipped due to batch boundary)
+        assert len(downloaded_symbols) == 7
+        assert set(downloaded_symbols) == set(symbols)
+        
+        # Verify no duplicates
+        assert len(downloaded_symbols) == len(set(downloaded_symbols)), \
+            f"Duplicate downloads: {[s for s in downloaded_symbols if downloaded_symbols.count(s) > 1]}"
+        
+        # Verify stats
+        assert result['completed'] == 7
+        assert result['failed'] == 0
+        assert result['skipped'] == 0
+        
+        # Verify checkpoint written 3 times (3 batches: 3+3+1)
+        assert mock_checkpoint.call_count == 3
+        
+        # Verify final checkpoint has all symbols
+        final_checkpoint = mock_checkpoint.call_args_list[2].args[0]
+        assert len(final_checkpoint) == 7
+        assert final_checkpoint == set(symbols)
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_uneven_batch_distribution(self, mock_exists, mock_file):
+        """Should download all symbols across multiple batches with varying sizes"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 27 symbols with batch_size=10 creates batches of 10+10+7
+        # Tests the pattern: multiple full batches + partial final batch
+        symbols = [f'SYM{i:02d}' for i in range(27)]
+        mock_file.return_value.read.return_value = json.dumps({'symbols': symbols})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            batch_size=10
+        )
+        
+        # Track downloads
+        downloaded_symbols = []
+        def download_side_effect(symbol):
+            downloaded_symbols.append(symbol)
+            return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        
+        with patch.object(downloader, 'download_symbol_prices', side_effect=download_side_effect):
+            with patch.object(downloader, '_read_checkpoint', return_value=set()):
+                with patch.object(downloader, '_write_checkpoint') as mock_checkpoint:
+                    result = downloader.download_all()
+        
+        # Verify ALL 27 symbols downloaded
+        assert len(downloaded_symbols) == 27
+        assert set(downloaded_symbols) == set(symbols)
+        
+        # Verify no symbols missed or duplicated
+        assert result['completed'] == 27
+        assert result['failed'] == 0
+        assert result['skipped'] == 0
+        
+        # Verify 3 batches (10+10+7)
+        assert mock_checkpoint.call_count == 3
+        
+        # Verify progressive checkpoint accumulation
+        batch_sizes = [len(call.args[0]) for call in mock_checkpoint.call_args_list]
+        assert batch_sizes == [10, 20, 27]  # Accumulates: 10, then +10=20, then +7=27
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_verifies_no_symbol_duplicates(self, mock_exists, mock_file):
+        """Should download each symbol exactly once across all batches"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 15 symbols with batch_size=10 creates batches of 10+5
+        symbols = [f'SYM{i:02d}' for i in range(15)]
+        mock_file.return_value.read.return_value = json.dumps({'symbols': symbols})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            batch_size=10
+        )
+        
+        # Track download calls
+        download_calls = []
+        def download_side_effect(symbol):
+            download_calls.append(symbol)
+            return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        
+        with patch.object(downloader, 'download_symbol_prices', side_effect=download_side_effect):
+            with patch.object(downloader, '_read_checkpoint', return_value=set()):
+                with patch.object(downloader, '_write_checkpoint'):
+                    result = downloader.download_all()
+        
+        # Verify no duplicates in download calls
+        assert len(download_calls) == len(set(download_calls)), \
+            f"Duplicate downloads detected: {[s for s in download_calls if download_calls.count(s) > 1]}"
+        
+        # Verify all symbols downloaded exactly once
+        assert set(download_calls) == set(symbols)
+        assert len(download_calls) == 15
+    
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('backtesting.price_data_source.Path.exists')
+    def test_download_all_checkpoint_excludes_failed_symbols_exact_count(self, mock_exists, mock_file):
+        """Should checkpoint only successful downloads, verifying exact counts per batch"""
+        # No checkpoint
+        def exists_side_effect(path=None):
+            if 'yfinance_1d_progress.json' in str(path):
+                return False
+            return True
+        mock_exists.side_effect = exists_side_effect
+        
+        # 7 symbols with batch_size=3 → batches: 3+3+1
+        symbols = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN', 'NVDA', 'META']
+        mock_file.return_value.read.return_value = json.dumps({'symbols': symbols})
+        
+        downloader = PriceDownloader(
+            index_symbol='SPY',
+            metadata_dir='backtest_data/metadata',
+            output_dir='backtest_data',
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            batch_size=3
+        )
+        
+        # MSFT and NVDA fail, others succeed
+        failed_symbols = {'MSFT', 'NVDA'}
+        def download_side_effect(symbol):
+            if symbol in failed_symbols:
+                return {'symbol': symbol, 'downloaded': False, 'skipped': False}
+            return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+        
+        with patch.object(downloader, 'download_symbol_prices', side_effect=download_side_effect):
+            with patch.object(downloader, '_read_checkpoint', return_value=set()):
+                with patch.object(downloader, '_write_checkpoint') as mock_checkpoint:
+                    result = downloader.download_all()
+        
+        # Verify result counts
+        assert result['completed'] == 5  # 7 total - 2 failed
+        assert result['failed'] == 2
+        assert result['skipped'] == 0
+        
+        # Verify checkpoint progression (3 batches)
+        assert mock_checkpoint.call_count == 3
+        
+        # Batch 1: [AAPL, MSFT, GOOGL] → MSFT fails → checkpoint: {AAPL, GOOGL}
+        batch1_checkpoint = mock_checkpoint.call_args_list[0].args[0]
+        assert batch1_checkpoint == {'AAPL', 'GOOGL'}
+        assert len(batch1_checkpoint) == 2
+        
+        # Batch 2: [TSLA, AMZN, NVDA] → NVDA fails → checkpoint: {AAPL, GOOGL, TSLA, AMZN}
+        batch2_checkpoint = mock_checkpoint.call_args_list[1].args[0]
+        assert batch2_checkpoint == {'AAPL', 'GOOGL', 'TSLA', 'AMZN'}
+        assert len(batch2_checkpoint) == 4
+        
+        # Batch 3: [META] → succeeds → checkpoint: {AAPL, GOOGL, TSLA, AMZN, META}
+        batch3_checkpoint = mock_checkpoint.call_args_list[2].args[0]
+        assert batch3_checkpoint == {'AAPL', 'GOOGL', 'TSLA', 'AMZN', 'META'}
+        assert len(batch3_checkpoint) == 5
+        
+        # Verify failed symbols NEVER appear in any checkpoint
+        for call in mock_checkpoint.call_args_list:
+            checkpoint_set = call[0][0]
+            assert not (failed_symbols & checkpoint_set), \
+                f"Failed symbols {failed_symbols & checkpoint_set} found in checkpoint"
+

@@ -927,4 +927,82 @@ class PriceDownloader:
                    f"[{start_date}, {end_date}]")
         
         return {'symbol': symbol, 'downloaded': True, 'skipped': False}
+    
+    def download_all(self) -> dict:
+        """
+        Download prices for all constituents in batches with checkpoint resume support.
+        
+        Returns dict with keys:
+        - total: Total number of symbols to download
+        - completed: Number of symbols successfully downloaded (in this run)
+        - failed: Number of symbols that failed
+        - skipped: Number of symbols skipped (already in checkpoint)
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # Load checkpoint to get completed symbols
+        completed_symbols = self._read_checkpoint()
+        
+        # Filter out already completed symbols
+        remaining_symbols = [s for s in self.constituents if s not in completed_symbols]
+        skipped_count = len(completed_symbols)  # Symbols already in checkpoint are skipped
+        
+        logger.info(f"Starting download: {len(remaining_symbols)} symbols to download, "
+                   f"{skipped_count} already completed")
+        
+        if not remaining_symbols:
+            return {
+                'total': len(self.constituents),
+                'completed': 0,  # No new downloads in this run
+                'failed': 0,
+                'skipped': skipped_count
+            }
+        
+        # Process symbols in batches
+        completed_count = 0  # Count only new downloads in this run
+        failed_count = 0
+        
+        for batch_start in range(0, len(remaining_symbols), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(remaining_symbols))
+            batch = remaining_symbols[batch_start:batch_end]
+            
+            logger.info(f"Processing batch {batch_start//self.batch_size + 1}: "
+                       f"{len(batch)} symbols ({batch_start + 1}-{batch_end} of {len(remaining_symbols)})")
+            
+            # Download batch in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit all downloads in this batch
+                future_to_symbol = {
+                    executor.submit(self.download_symbol_prices, symbol): symbol
+                    for symbol in batch
+                }
+                
+                # Collect results
+                batch_completed = []
+                for future in as_completed(future_to_symbol):
+                    symbol = future_to_symbol[future]
+                    try:
+                        result = future.result()
+                        if result.get('downloaded') or result.get('skipped'):
+                            batch_completed.append(symbol)
+                            completed_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(f"{symbol}: Download unsuccessful")
+                    except Exception as e:
+                        failed_count += 1
+                        logger.error(f"{symbol}: Exception during download: {e}")
+            
+            # Update checkpoint after batch completes
+            completed_symbols.update(batch_completed)
+            self._write_checkpoint(completed_symbols.copy())  # Pass copy to avoid mutation issues
+            
+            logger.info(f"Batch complete: {len(batch_completed)}/{len(batch)} successful")
+        
+        return {
+            'total': len(self.constituents),
+            'completed': completed_count,
+            'failed': failed_count,
+            'skipped': skipped_count
+        }
 
