@@ -12,7 +12,7 @@ import sys
 import time
 import yfinance as yf
 from datetime import datetime
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Set, Tuple, Any
 from pathlib import Path
 from tqdm import tqdm
 
@@ -364,7 +364,7 @@ class MetadataDownloader:
         logger.error(error_msg)
         raise ValueError(error_msg)
     
-    def update_metadata(self, rate_limit_delay: float = 1.0) -> Dict[str, any]:
+    def update_metadata(self, rate_limit_delay: float = 1.0) -> Dict[str, Any]:
         """
         Orchestrate the full metadata update process.
         
@@ -415,7 +415,7 @@ class MetadataDownloader:
         if to_add:
             logger.info(f"Phase 3: Downloading metadata for {len(to_add)} symbols")
             failed_symbols, new_metadata = self.download_metadata_batch(
-                to_add, 
+                list(to_add), 
                 rate_limit_delay=rate_limit_delay
             )
             

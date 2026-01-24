@@ -78,6 +78,7 @@ class YFinanceSource(PriceDataSource):
             max_workers: Maximum number of parallel download threads (default: 5)
         """
         self.interval = interval
+        self.rate_limit_delay = 2.0  # Default rate limit delay between batches
         self.auto_adjust = auto_adjust
         self.prepost = prepost
         self.max_workers = max_workers

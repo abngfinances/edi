@@ -767,11 +767,31 @@ class TestMetadataAndFolderStructure:
         assert prices_path == Path('backtest_data/GOOGL/yfinance_1d/prices.parquet')
     
     @patch('builtins.open', new_callable=mock_open)
-    def test_read_metadata_file_not_exists(self, mock_file):
+    @patch('backtesting.price_data_source.Path')
+    def test_read_metadata_file_not_exists(self, mock_path_class, mock_file):
         """Should return None when metadata file doesn't exist"""
-        # Setup mock for constituents
+        # Setup mock for constituents file to exist
         constituents_data = {'symbols': ['AAPL']}
         mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create mock path instances
+        mock_constituents_path = MagicMock()
+        mock_constituents_path.exists.return_value = True
+        mock_constituents_path.__truediv__ = lambda self, other: mock_constituents_path
+        
+        mock_metadata_path = MagicMock()
+        mock_metadata_path.exists.return_value = False
+        
+        mock_output_path = MagicMock()
+        mock_output_path.__truediv__ = lambda self, other: mock_metadata_path if 'metadata' in str(other) else mock_output_path
+        
+        # Configure Path class to return appropriate mocks
+        def path_side_effect(arg):
+            if 'metadata' in str(arg):
+                return mock_constituents_path
+            return mock_output_path
+        
+        mock_path_class.side_effect = path_side_effect
         
         # Execute
         downloader = PriceDownloader(
@@ -782,10 +802,9 @@ class TestMetadataAndFolderStructure:
             end_date='2020-12-31'
         )
         
-        # Patch exists after initialization to simulate metadata file not existing
-        with patch('backtesting.price_data_source.Path.exists', return_value=False):
-            metadata = downloader._read_metadata('AAPL')
-            assert metadata is None
+        # Test metadata file not existing
+        metadata = downloader._read_metadata('AAPL')
+        assert metadata is None
     
     @patch('backtesting.price_data_source.Path.exists')
     @patch('builtins.open', new_callable=mock_open)
@@ -985,11 +1004,31 @@ class TestDateRangePlanning:
     """Test date range planning and merge logic"""
     
     @patch('builtins.open', new_callable=mock_open)
-    def test_plan_date_range_no_existing_metadata(self, mock_file):
+    @patch('backtesting.price_data_source.Path')
+    def test_plan_date_range_no_existing_metadata(self, mock_path_class, mock_file):
         """Should return full range when no existing metadata"""
         # Setup mock
         constituents_data = {'symbols': ['AAPL']}
         mock_file.return_value.read.return_value = json.dumps(constituents_data)
+        
+        # Create mock path instances
+        mock_constituents_path = MagicMock()
+        mock_constituents_path.exists.return_value = True
+        mock_constituents_path.__truediv__ = lambda self, other: mock_constituents_path
+        
+        mock_metadata_path = MagicMock()
+        mock_metadata_path.exists.return_value = False
+        
+        mock_output_path = MagicMock()
+        mock_output_path.__truediv__ = lambda self, other: mock_metadata_path if 'metadata' in str(other) else mock_output_path
+        
+        # Configure Path class to return appropriate mocks
+        def path_side_effect(arg):
+            if 'metadata' in str(arg):
+                return mock_constituents_path
+            return mock_output_path
+        
+        mock_path_class.side_effect = path_side_effect
         
         # Execute
         downloader = PriceDownloader(
