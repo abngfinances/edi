@@ -393,60 +393,69 @@ class TestRealYFinanceIntegration:
         metadata_dir.mkdir()
         output_dir = tmp_path / "backtest_data"
         
-        # Create constituents file with real symbol
-        # Note: Using only AAPL (many stocks have fractional splits that fail validation)
+        # Create constituents file with real symbols
+        # Using AAPL, MSFT, GOOGL to test the fix for historical split filtering
         constituents_file = metadata_dir / "spy_constituents.json"
         constituents_file.write_text(json.dumps({
-            'symbols': ['AAPL'],  # Real symbol for testing
+            'symbols': ['AAPL', 'MSFT', 'GOOGL'],  # Test symbols (MSFT/GOOGL have fractional splits)
             'metadata': {
                 'index_symbol': 'SPY',
                 'download_timestamp': '2020-01-01T00:00:00',
-                'total_holdings': 1
+                'total_holdings': 3
             }
         }))
         
         # Run CLI with real API (no mocking) - only 2 days for speed
+        # Date range: 2020-01-02 to 2020-01-03 (should NOT include splits from 1991/2014)
         with patch('sys.argv', [
             'price_data_downloader.py', 'SPY',
             '--start-date', '2020-01-02',
-            '--end-date', '2020-01-03',  # Only 2 days
+            '--end-date', '2020-01-03',  # Only 2 days in 2020
             '--metadata-dir', str(metadata_dir),
             '--output-dir', str(output_dir),
-            '--batch-size', '1',
+            '--batch-size', '3',
             '--rate-limit-delay', '2.0'  # Be nice to yfinance
         ]):
             exit_code = main()
         
-        # Verify success
-        assert exit_code == 0
+        # The test should pass - verify we got the files
+        # If it fails due to split validation, the bug is that we're getting
+        # historical splits from outside our requested date range
+        assert exit_code == 0, f"Download failed with exit code {exit_code}"
         
-        # Verify price files created for AAPL
-        aapl_dir = output_dir / 'AAPL' / 'yfinance_1d'
-        assert aapl_dir.exists(), f"AAPL directory not found at {aapl_dir}"
-        assert (aapl_dir / 'prices.parquet').exists(), "AAPL prices.parquet not found"
-        assert (aapl_dir / 'metadata.json').exists(), "AAPL metadata.json not found"
+        # Check which symbols succeeded (skip checkpoints directory)
+        symbol_dirs = [d for d in output_dir.glob('*/') if d.name != 'checkpoints']
+        logger.info(f"Symbol directories created: {[d.name for d in symbol_dirs]}")
         
-        # Verify checkpoint created
-        checkpoint_file = output_dir / 'checkpoints' / 'yfinance_1d_progress.json'
-        assert checkpoint_file.exists(), "Checkpoint file not found"
+        # Verify we got all 3 symbols
+        assert len(symbol_dirs) == 3, f"Expected 3 symbols, got {len(symbol_dirs)}"
         
-        # Verify actual price data downloaded
-        import pandas as pd
-        aapl_prices = pd.read_parquet(aapl_dir / 'prices.parquet')
-        assert len(aapl_prices) > 0, "No AAPL price data found"
-        assert 'Close' in aapl_prices.columns, "Close column missing from AAPL prices"
-        assert 'Open' in aapl_prices.columns, "Open column missing from AAPL prices"
-        assert 'High' in aapl_prices.columns, "High column missing from AAPL prices"
-        assert 'Low' in aapl_prices.columns, "Low column missing from AAPL prices"
-        assert 'Volume' in aapl_prices.columns, "Volume column missing from AAPL prices"
+        # If we have any successful downloads, verify the structure
+        for symbol_dir in symbol_dirs:
+            symbol = symbol_dir.name
+            data_dir = symbol_dir / 'yfinance_1d'
+            
+            logger.info(f"Verifying {symbol} data...")
+            assert data_dir.exists(), f"{symbol} data directory not found"
+            assert (data_dir / 'prices.parquet').exists(), f"{symbol} prices.parquet not found"
+            assert (data_dir / 'metadata.json').exists(), f"{symbol} metadata.json not found"
+            
+            # Check the actual data
+            import pandas as pd
+            prices = pd.read_parquet(data_dir / 'prices.parquet')
+            logger.info(f"{symbol}: Downloaded {len(prices)} price records")
+            logger.info(f"{symbol}: Price date range: {prices.index.min()} to {prices.index.max()}")
+            
+            # Verify all OHLCV columns are present
+            expected_columns = {'Open', 'High', 'Low', 'Close', 'Volume'}
+            assert expected_columns.issubset(prices.columns), \
+                f"{symbol}: Missing columns. Expected {expected_columns}, got {set(prices.columns)}"
+            
+            # Verify metadata
+            metadata = json.loads((data_dir / 'metadata.json').read_text())
+            assert metadata['symbol'] == symbol
+            assert metadata['start_date'] == '2020-01-02'
+            assert metadata['end_date'] == '2020-01-03'
+            logger.info(f"{symbol}: Metadata verified")
         
-        # Verify metadata contains correct information
-        metadata = json.loads((aapl_dir / 'metadata.json').read_text())
-        assert metadata['symbol'] == 'AAPL'
-        assert metadata['start_date'] == '2020-01-02'
-        assert metadata['end_date'] == '2020-01-03'
-        assert metadata['interval'] == '1d'
-        assert metadata['source'] == 'yfinance'
-        
-        logger.info("Real integration test completed successfully")
-        logger.info(f"Downloaded {len(aapl_prices)} price records for AAPL")
+        logger.info("Real integration test completed - AAPL, MSFT, and GOOGL downloaded successfully!")

@@ -141,6 +141,35 @@ class YFinanceSource(PriceDataSource):
             splits = ticker.splits
             dividends = ticker.dividends
             
+            # Filter splits and dividends to requested date range
+            # yfinance returns ALL historical data, not just the requested range
+            def filter_by_date_range(series: pd.Series, series_name: str) -> pd.Series:
+                """Filter series to date range, handling timezone-aware indices."""
+                if len(series) == 0:
+                    return series
+                
+                # Verify index structure (EDI: error out on unexpected structure)
+                if not hasattr(series.index, 'tz'):
+                    error_msg = (f"{symbol}: {series_name}.index missing 'tz' attribute. "
+                               f"Expected DatetimeIndex from yfinance. "
+                               f"This may indicate a yfinance API change or data corruption.")
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                series_tz = getattr(series.index, 'tz', None)
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                
+                # Localize comparison dates if series has timezone
+                if series_tz is not None:
+                    start_dt = start_dt.tz_localize(series_tz)
+                    end_dt = end_dt.tz_localize(series_tz)
+                
+                return series[(series.index >= start_dt) & (series.index <= end_dt)]
+            
+            splits = filter_by_date_range(splits, 'splits')
+            dividends = filter_by_date_range(dividends, 'dividends')
+            
             # Validate split ratios are whole numbers
             if len(splits) > 0:
                 for date, ratio in splits.items():
