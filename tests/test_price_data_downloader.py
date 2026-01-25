@@ -136,15 +136,16 @@ class TestCLIValidation:
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-12-31'])
     @patch('backtesting.price_data_downloader.PriceDownloader')
     def test_missing_constituents_file_returns_error_code(self, mock_downloader_class, caplog):
-        """Should return exit code 1 and helpful message when constituents file missing"""
+        """Should return error code when constituents file is missing"""
         mock_downloader_class.side_effect = FileNotFoundError("spy_constituents.json not found")
         
         exit_code = main()
         
         assert exit_code == 1
-        # Should show helpful message about running prerequisite steps in logs
-        assert 'index_downloader' in caplog.text
-        assert 'metadata_downloader' in caplog.text
+        log_output = caplog.text
+        # Should show helpful message about running prerequisite steps
+        assert 'index_downloader' in log_output
+        assert 'metadata_downloader' in log_output
     
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-12-31'])
     @patch('backtesting.price_data_downloader.PriceDownloader')
@@ -245,46 +246,47 @@ class TestCLIOutput:
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-12-31'])
     @patch('backtesting.price_data_downloader.PriceDownloader')
     def test_success_summary_displayed(self, mock_downloader_class, caplog):
-        """Should log download summary on success"""
+        """Should display formatted summary on successful completion"""
+        caplog.set_level(logging.INFO)
         mock_instance = MagicMock()
         mock_instance.download_all.return_value = {
             'total': 10, 'completed': 8, 'failed': 2, 'skipped': 0
         }
         mock_downloader_class.return_value = mock_instance
         
-        with caplog.at_level(logging.INFO):
-            exit_code = main()
+        exit_code = main()
         
-        # Verify summary contains key information in logs
-        assert 'DOWNLOAD COMPLETE' in caplog.text
-        assert 'Total symbols: 10' in caplog.text
-        assert 'Successfully downloaded: 8' in caplog.text
-        assert 'Failed: 2' in caplog.text
-        assert 'Skipped (from checkpoint): 0' in caplog.text
+        log_output = caplog.text
+        # Verify summary contains key information
+        assert 'DOWNLOAD COMPLETE' in log_output
+        assert 'Total symbols: 10' in log_output
+        assert 'Successfully downloaded: 8' in log_output
+        assert 'Failed: 2' in log_output
+        assert 'Skipped (from checkpoint): 0' in log_output
         assert exit_code == 0
     
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-12-31'])
     @patch('backtesting.price_data_downloader.PriceDownloader')
     def test_checkpoint_resume_summary(self, mock_downloader_class, caplog):
-        """Should log skipped count in summary when resuming from checkpoint"""
+        """Should show skipped count in summary when resuming from checkpoint"""
+        caplog.set_level(logging.INFO)
         mock_instance = MagicMock()
         mock_instance.download_all.return_value = {
             'total': 10, 'completed': 3, 'failed': 0, 'skipped': 7
         }
         mock_downloader_class.return_value = mock_instance
         
-        with caplog.at_level(logging.INFO):
-            exit_code = main()
+        exit_code = main()
         
-        # Check logs instead of stdout
-        assert 'Successfully downloaded: 3' in caplog.text
-        assert 'Skipped (from checkpoint): 7' in caplog.text
+        log_output = caplog.text
+        assert 'Successfully downloaded: 3' in log_output
+        assert 'Skipped (from checkpoint): 7' in log_output
         assert exit_code == 0
     
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-12-31'])
     @patch('backtesting.price_data_downloader.PriceDownloader')
     def test_warning_displayed_on_failures(self, mock_downloader_class, caplog):
-        """Should log warning when some downloads fail"""
+        """Should display warning when some downloads fail"""
         mock_instance = MagicMock()
         mock_instance.download_all.return_value = {
             'total': 10, 'completed': 7, 'failed': 3, 'skipped': 0
@@ -293,9 +295,9 @@ class TestCLIOutput:
         
         exit_code = main()
         
-        # Check logs for warning
-        assert 'WARNING' in caplog.text or 'warning' in caplog.text.lower()
-        assert '3 symbols failed' in caplog.text
+        log_output = caplog.text
+        assert 'WARNING' in log_output
+        assert '3 symbols failed' in log_output
         assert exit_code == 0
     
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', 
