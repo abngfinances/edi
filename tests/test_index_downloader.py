@@ -372,7 +372,7 @@ class TestIndexDownloaderIntegration:
         import sys
         api_key = 'DUJRZATXXEQL2M9R'  # Default test API key
         symbol = 'QQQ'  # Default to QQQ
-        expected_count = 100  # Default expectation
+        expected_count = 103  # Default expectation (updated 2025-01)
         
         # Check for pytest custom args
         if hasattr(pytest, 'symbol'):
