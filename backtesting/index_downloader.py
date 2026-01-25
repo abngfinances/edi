@@ -5,6 +5,7 @@ Downloads index constituent lists from Alpha Vantage ETF_PROFILE API.
 Simple, modular downloader with no fallbacks or checkpointing.
 """
 
+import sys
 import json
 import logging
 import requests
