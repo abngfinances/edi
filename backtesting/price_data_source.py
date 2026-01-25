@@ -42,25 +42,6 @@ class PriceDataSource(ABC):
             ValueError: If download fails or data is invalid
         """
         pass
-    
-    @abstractmethod
-    def download_batch_parallel(self, symbols: list, start_date: str, end_date: str, 
-                                rate_limit_delay: float = 2.0) -> Tuple[Set[str], Dict[str, Dict]]:
-        """
-        Download price data for multiple symbols in parallel.
-        
-        Args:
-            symbols: List of stock symbols to download
-            start_date: Start date in 'YYYY-MM-DD' format
-            end_date: End date in 'YYYY-MM-DD' format
-            rate_limit_delay: Delay in seconds between batches (default: 2.0)
-            
-        Returns:
-            Tuple of (failed_symbols, results_dict)
-            - failed_symbols: Set of symbols that failed to download
-            - results_dict: Dict mapping symbol -> result dict (with prices, splits, dividends)
-        """
-        pass
 
 
 class YFinanceSource(PriceDataSource):
@@ -227,57 +208,6 @@ class YFinanceSource(PriceDataSource):
         
         # Should never reach here, but satisfy type checker
         raise last_exception if last_exception else ValueError(f"Failed to download {symbol}")
-    
-    def download_batch_parallel(self, symbols: list, start_date: str, end_date: str,
-                                rate_limit_delay: float = 2.0) -> Tuple[Set[str], Dict[str, Dict]]:
-        """
-        Download price data for multiple symbols in parallel using ThreadPoolExecutor.
-        
-        Args:
-            symbols: List of stock symbols to download
-            start_date: Start date in 'YYYY-MM-DD' format
-            end_date: End date in 'YYYY-MM-DD' format
-            rate_limit_delay: Delay in seconds after batch completes (default: 2.0)
-            
-        Returns:
-            Tuple of (failed_symbols, results_dict)
-            - failed_symbols: Set of symbols that failed to download
-            - results_dict: Dict mapping symbol -> result dict (with prices, splits, dividends)
-        """
-        logger.info(f"Starting parallel download of {len(symbols)} symbols "
-                   f"(max_workers={self.max_workers})")
-        
-        failed_symbols = set()
-        results_dict = {}
-        
-        # Download in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all download tasks
-            future_to_symbol = {
-                executor.submit(self._download_symbol_with_retry, symbol, start_date, end_date): symbol
-                for symbol in symbols
-            }
-            
-            # Process completed downloads
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    result = future.result()
-                    results_dict[symbol] = result
-                    logger.debug(f"✓ Downloaded {symbol}")
-                except Exception as e:
-                    logger.warning(f"✗ Failed to download {symbol}: {e}")
-                    failed_symbols.add(symbol)
-        
-        logger.info(f"Batch download complete: {len(results_dict)} succeeded, "
-                   f"{len(failed_symbols)} failed")
-        
-        # Rate limiting between batches
-        if rate_limit_delay > 0:
-            logger.debug(f"Rate limiting: sleeping {rate_limit_delay}s")
-            time.sleep(rate_limit_delay)
-        
-        return failed_symbols, results_dict
 
 
 class PriceDownloader:
@@ -1033,6 +963,11 @@ class PriceDownloader:
             self._write_checkpoint(completed_symbols.copy())  # Pass copy to avoid mutation issues
             
             logger.info(f"Batch complete: {len(batch_completed)}/{len(batch)} successful")
+            
+            # Rate limiting between batches (skip after last batch)
+            if self.data_source.rate_limit_delay > 0 and batch_end < len(remaining_symbols):
+                logger.debug(f"Rate limiting: sleeping {self.data_source.rate_limit_delay}s before next batch")
+                time.sleep(self.data_source.rate_limit_delay)
         
         return {
             'total': len(self.constituents),
