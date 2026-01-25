@@ -8,7 +8,7 @@ Simple, modular downloader with no fallbacks or checkpointing.
 import json
 import logging
 import requests
-from typing import List, Dict
+from typing import Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime
 
@@ -116,7 +116,7 @@ class IndexDownloader:
             logger.error(error_msg)
             raise ValueError(error_msg) from e
     
-    def save_constituents(self, output_path: str, data: Dict = None) -> None:
+    def save_constituents(self, output_path: str, data: Optional[Dict[str, Any]] = None) -> None:
         """
         Save index constituents to JSON file.
         

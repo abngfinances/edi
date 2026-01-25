@@ -181,10 +181,12 @@ class YFinanceSource(PriceDataSource):
         Raises:
             ValueError: If all retries fail
         """
+        last_exception = None
         for attempt in range(max_retries):
             try:
                 return self.download_symbol(symbol, start_date, end_date)
             except Exception as e:
+                last_exception = e
                 # Check if it's a rate limit error (429)
                 if '429' in str(e) and attempt < max_retries - 1:
                     wait_time = (2 ** attempt) * 1.0  # Exponential backoff: 1s, 2s, 4s
@@ -193,6 +195,9 @@ class YFinanceSource(PriceDataSource):
                     time.sleep(wait_time)
                 else:
                     raise
+        
+        # Should never reach here, but satisfy type checker
+        raise last_exception if last_exception else ValueError(f"Failed to download {symbol}")
     
     def download_batch_parallel(self, symbols: list, start_date: str, end_date: str,
                                 rate_limit_delay: float = 2.0) -> Tuple[Set[str], Dict[str, Dict]]:

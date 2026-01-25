@@ -368,19 +368,10 @@ class TestIndexDownloaderIntegration:
         """
         logger.info("Running integration test with real Alpha Vantage ETF_PROFILE API")
         
-        # Get parameters from pytest config (passed via command line)
-        import sys
+        # Test parameters
         api_key = 'DUJRZATXXEQL2M9R'  # Default test API key
         symbol = 'QQQ'  # Default to QQQ
         expected_count = 103  # Default expectation (updated 2025-01)
-        
-        # Check for pytest custom args
-        if hasattr(pytest, 'symbol'):
-            symbol = pytest.symbol
-        if hasattr(pytest, 'expected_count'):
-            expected_count = pytest.expected_count
-        if hasattr(pytest, 'api_key'):
-            api_key = pytest.api_key
         
         logger.info(f"Testing with symbol={symbol}, expected_count={expected_count}")
         
