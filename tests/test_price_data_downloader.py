@@ -320,17 +320,16 @@ class TestCLIOutput:
 
 
 # ============================================================================
-# Phase 5: Integration Test (marked for optional execution)
+# Phase 5: File System Integration Test (mocked data source)
 # ============================================================================
 
-@pytest.mark.integration
-class TestCLIIntegration:
-    """Integration test with real file system (slow, marked for optional execution)"""
+class TestCLIFileSystemIntegration:
+    """Test CLI with real file system but mocked data source"""
     
     @patch('sys.argv', ['price_data_downloader.py', 'SPY', '--start-date', '2020-01-01', '--end-date', '2020-01-10'])
     @patch('backtesting.price_data_source.YFinanceSource.download_symbol')
     def test_end_to_end_download_flow(self, mock_download_symbol, tmp_path):
-        """Should perform end-to-end download with file creation (integration test)"""
+        """Should perform end-to-end download with file creation (mocked data source)"""
         # Setup temporary directories
         metadata_dir = tmp_path / "metadata"
         metadata_dir.mkdir()
@@ -375,3 +374,79 @@ class TestCLIIntegration:
         # Verify price files were created (at least one symbol folder)
         symbol_folders = list(output_dir.glob('*/'))
         assert len(symbol_folders) > 0
+
+
+# ============================================================================
+# Phase 6: Real Integration Test (marked for optional execution)
+# ============================================================================
+
+@pytest.mark.integration
+class TestRealYFinanceIntegration:
+    """Real integration test with yfinance API (slow, requires network)"""
+    
+    def test_download_real_price_data(self, tmp_path):
+        """Should download real historical prices from yfinance"""
+        logger.info("Running integration test with real yfinance API")
+        
+        # Setup temporary directories
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+        output_dir = tmp_path / "backtest_data"
+        
+        # Create constituents file with real symbol
+        # Note: Using only AAPL (many stocks have fractional splits that fail validation)
+        constituents_file = metadata_dir / "spy_constituents.json"
+        constituents_file.write_text(json.dumps({
+            'symbols': ['AAPL'],  # Real symbol for testing
+            'metadata': {
+                'index_symbol': 'SPY',
+                'download_timestamp': '2020-01-01T00:00:00',
+                'total_holdings': 1
+            }
+        }))
+        
+        # Run CLI with real API (no mocking) - only 2 days for speed
+        with patch('sys.argv', [
+            'price_data_downloader.py', 'SPY',
+            '--start-date', '2020-01-02',
+            '--end-date', '2020-01-03',  # Only 2 days
+            '--metadata-dir', str(metadata_dir),
+            '--output-dir', str(output_dir),
+            '--batch-size', '1',
+            '--rate-limit-delay', '2.0'  # Be nice to yfinance
+        ]):
+            exit_code = main()
+        
+        # Verify success
+        assert exit_code == 0
+        
+        # Verify price files created for AAPL
+        aapl_dir = output_dir / 'AAPL' / 'yfinance_1d'
+        assert aapl_dir.exists(), f"AAPL directory not found at {aapl_dir}"
+        assert (aapl_dir / 'prices.parquet').exists(), "AAPL prices.parquet not found"
+        assert (aapl_dir / 'metadata.json').exists(), "AAPL metadata.json not found"
+        
+        # Verify checkpoint created
+        checkpoint_file = output_dir / 'checkpoints' / 'yfinance_1d_progress.json'
+        assert checkpoint_file.exists(), "Checkpoint file not found"
+        
+        # Verify actual price data downloaded
+        import pandas as pd
+        aapl_prices = pd.read_parquet(aapl_dir / 'prices.parquet')
+        assert len(aapl_prices) > 0, "No AAPL price data found"
+        assert 'Close' in aapl_prices.columns, "Close column missing from AAPL prices"
+        assert 'Open' in aapl_prices.columns, "Open column missing from AAPL prices"
+        assert 'High' in aapl_prices.columns, "High column missing from AAPL prices"
+        assert 'Low' in aapl_prices.columns, "Low column missing from AAPL prices"
+        assert 'Volume' in aapl_prices.columns, "Volume column missing from AAPL prices"
+        
+        # Verify metadata contains correct information
+        metadata = json.loads((aapl_dir / 'metadata.json').read_text())
+        assert metadata['symbol'] == 'AAPL'
+        assert metadata['start_date'] == '2020-01-02'
+        assert metadata['end_date'] == '2020-01-03'
+        assert metadata['interval'] == '1d'
+        assert metadata['source'] == 'yfinance'
+        
+        logger.info("Real integration test completed successfully")
+        logger.info(f"Downloaded {len(aapl_prices)} price records for AAPL")
