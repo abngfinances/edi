@@ -41,7 +41,7 @@ def _():
 
     import marimo as mo
     import pandas as pd
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # type: ignore
 
     # Configure paths
     METADATA_DIR = Path(project_root) / "backtest_data" / "metadata"
@@ -88,8 +88,8 @@ def _(METADATA_DIR, index_symbol, json, mo):
         _status = mo.md(f"**Error:** {error_message}")
     else:
         _status = mo.md(f"**Loaded {len(constituents)} constituents**")
-    
-    _status
+
+    _status  # type: ignore
     return (constituents,)
 
 
@@ -101,7 +101,7 @@ def _(constituents, mo):
         value=constituents[0] if constituents else None,
         label="Select Symbol:"
     )
-    symbol_dropdown
+    symbol_dropdown  # type: ignore
     return (symbol_dropdown,)
 
 
@@ -162,8 +162,8 @@ def _(load_error, metadata, mo, prices_df, selected_symbol):
         """)
     else:
         _summary = None
-    
-    _summary
+
+    _summary  # type: ignore
     return
 
 
@@ -208,7 +208,7 @@ def _(go, prices_df, selected_symbol):
         )
         _fig_output = _fig
 
-    _fig_output
+    _fig_output  # type: ignore
     return
 
 
@@ -235,7 +235,7 @@ def _(mo, prices_df):
             mo.ui.table(_display_df, selection=None)
         ])
 
-    _table_output
+    _table_output  # type: ignore
     return
 
 
@@ -256,7 +256,7 @@ def _(metadata, mo, pd):
     else:
         _splits_output = mo.md("### Stock Splits\nNo splits in this period.")
 
-    _splits_output
+    _splits_output  # type: ignore
     return
 
 
@@ -277,7 +277,7 @@ def _(metadata, mo, pd):
     else:
         _dividends_output = mo.md("### Dividends\nNo dividends in this period.")
 
-    _dividends_output
+    _dividends_output  # type: ignore
     return
 
 
