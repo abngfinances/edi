@@ -427,5 +427,3 @@ class TestIndexDownloaderIntegration:
         logger.info(f"✓ Downloaded {symbol_count} symbols with complete metadata")
         logger.info(f"✓ Timestamp: {data['metadata']['download_timestamp']}")
         logger.info(f"✓ Integration test passed for {symbol}")
-        
-        return result
