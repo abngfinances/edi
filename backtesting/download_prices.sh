@@ -7,10 +7,11 @@ set -e  # Exit on error
 
 # Activate virtual environment
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-source "${SCRIPT_DIR}/.venv/bin/activate"
+PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
+source "${PROJECT_ROOT}/.venv/bin/activate"
 
 # Set Python path to project root
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # Configuration
 INDEX_SYMBOL="SPY"
