@@ -165,9 +165,9 @@ class TestDownloadSymbol:
         assert result['dividends'].iloc[1] == 0.82
     
     @patch('backtesting.price_data_source.yf.Ticker')
-    def test_download_symbol_validates_split_ratios(self, mock_ticker_class):
-        """Should raise ValueError for non-whole number split ratios"""
-        # Setup mock with invalid split ratio (fractional)
+    def test_download_symbol_accepts_fractional_split_ratios(self, mock_ticker_class):
+        """Should accept fractional split ratios (e.g., 3:2 splits = 1.5)"""
+        # Setup mock with fractional split ratio
         mock_ticker = Mock()
         mock_prices = pd.DataFrame({
             'Open': [100.0], 'High': [105.0], 'Low': [99.0],
@@ -175,7 +175,7 @@ class TestDownloadSymbol:
         }, index=pd.date_range('2020-01-01', periods=1, freq='D'))
         
         mock_splits = pd.Series(
-            [3.5],  # Invalid: fractional split ratio
+            [1.5],  # Fractional split ratio (3:2 split)
             index=pd.to_datetime(['2020-08-31'])
         )
         
@@ -184,14 +184,13 @@ class TestDownloadSymbol:
         mock_ticker.dividends = pd.Series([], dtype=float)
         mock_ticker_class.return_value = mock_ticker
         
-        # Execute and verify
+        # Execute - should not raise error
         source = YFinanceSource()
-        with pytest.raises(ValueError) as exc_info:
-            source.download_symbol('AAPL', '2020-01-01', '2020-12-31')
+        result = source.download_symbol('AAPL', '2020-01-01', '2020-12-31')
         
-        assert 'invalid split ratio' in str(exc_info.value).lower()
-        assert '3.5' in str(exc_info.value)
-        assert 'whole numbers' in str(exc_info.value).lower()
+        # Verify split was captured
+        assert len(result['splits']) == 1
+        assert result['splits'].iloc[0] == 1.5
     
     @patch('backtesting.price_data_source.yf.Ticker')
     def test_download_symbol_empty_data_raises_error(self, mock_ticker_class):

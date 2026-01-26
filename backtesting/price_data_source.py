@@ -151,15 +151,6 @@ class YFinanceSource(PriceDataSource):
             splits = filter_by_date_range(splits, 'splits')
             dividends = filter_by_date_range(dividends, 'dividends')
             
-            # Validate split ratios are whole numbers
-            if len(splits) > 0:
-                for date, ratio in splits.items():
-                    if not abs(ratio - round(ratio)) < 0.001:  # Allow small floating point error
-                        error_msg = (f"{symbol} has invalid split ratio {ratio} on {date}. "
-                                   f"Split ratios must be whole numbers (e.g., 2.0, 4.0)")
-                        logger.error(error_msg)
-                        raise ValueError(error_msg)
-            
             logger.debug(f"Successfully downloaded {symbol}: {len(prices)} rows, "
                         f"{len(splits)} splits, {len(dividends)} dividends")
             
